@@ -157,6 +157,81 @@ function saveState(stats: BrainStats, customNodes: MindNode[], exploredTopics: s
   } catch { /* */ }
 }
 
+// ─── Project Panel Component ──────────────────────────────
+function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExecuteTask, onNavigate, onSelectNode, onClosePanel, onFeed, onDelete }: {
+  projectNode: MindNode;
+  nodes: MindNode[];
+  theme: ThemeMode;
+  taskExecuting: string | null;
+  onClose: () => void;
+  onExecuteTask: (taskId: string, taskLabel: string, parentNodeId: string) => void;
+  onNavigate: (nodeId: string) => void;
+  onSelectNode: (node: MindNode) => void;
+  onClosePanel: () => void;
+  onFeed: (nodeId: string) => void;
+  onDelete: (nodeId: string) => void;
+}) {
+  // Get live project node from state (not stale from when panel was opened)
+  const liveProject = nodes.find(n => n.id === projectNode.id) || projectNode;
+  // Get child nodes (phases/tasks) for navigation
+  const childNodes = nodes.filter(n => n.parentId === liveProject.id);
+
+  const phaseLabels: Record<string, string> = {
+    idea: 'فكرة', analysis: 'تحليل', planning: 'تخطيط', execution: 'تنفيذ', done: 'مكتمل ✅',
+  };
+
+  return (
+    <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 w-96 max-w-[90vw] rounded-xl border p-4 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="text-sm font-bold">🚀 {liveProject.label}</h3>
+        <button onClick={onClose} className="text-xs opacity-50 hover:opacity-100">✕</button>
+      </div>
+      <p className="text-xs opacity-70 mb-2">{liveProject.summary}</p>
+      <div className="flex gap-2 text-[10px] mb-2">
+        <span>المرحلة: <b>{phaseLabels[liveProject.projectPhase] || liveProject.projectPhase}</b></span>
+        <span>التقدم: <b>{liveProject.projectProgress}%</b></span>
+      </div>
+      <div className="w-full h-2 rounded-full bg-white/10 mb-3">
+        <div className="h-full rounded-full transition-all" style={{ width: `${liveProject.projectProgress}%`, background: liveProject.projectProgress === 100 ? '#34d399' : '#f59e0b' }} />
+      </div>
+      {liveProject.projectTasks.length > 0 && (
+        <div className="space-y-1 max-h-48 overflow-y-auto mb-3">
+          <p className="text-[10px] font-bold opacity-60 mb-1">📋 المهام:</p>
+          {liveProject.projectTasks.map(task => (
+            <div key={task.id} className={`flex items-center justify-between p-1.5 rounded text-xs ${task.status === 'done' ? 'opacity-50 line-through' : ''}`}>
+              <span>{task.status === 'done' ? '✅' : task.status === 'in-progress' ? '🔄' : '⏳'} {task.label}</span>
+              {task.status !== 'done' && (
+                <Button size="sm" variant="outline" className="h-5 text-[9px] px-1.5" disabled={taskExecuting === task.id}
+                  onClick={() => onExecuteTask(task.id, task.label, liveProject.id)}>
+                  {taskExecuting === task.id ? '⏳' : '▶️'} نفّذ
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {/* Child nodes (phases) navigation */}
+      {childNodes.length > 0 && (
+        <div className="space-y-1 max-h-32 overflow-y-auto">
+          <p className="text-[10px] font-bold opacity-60 mb-1">📂 المراحل الفرعية:</p>
+          {childNodes.map(cn => (
+            <button key={cn.id}
+              className="w-full text-right px-2 py-1.5 rounded text-xs flex items-center justify-between hover:bg-white/5 transition-colors"
+              onClick={() => { onNavigate(cn.id); onSelectNode(cn); onClosePanel(); }}>
+              <span style={{ color: cn.color }}>● {cn.label}</span>
+              <span className="opacity-50 text-[9px]">{cn.tag}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-1 mt-3 pt-2 border-t border-white/10">
+        <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onFeed(liveProject.id)}>🍎 غذّ</Button>
+        <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-400" onClick={() => { onDelete(liveProject.id); onClose(); }}>🗑️ حذف</Button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Undo/Redo ─────────────────────────────────────────────
 interface HistoryEntry {
   nodes: MindNode[];
@@ -1894,62 +1969,21 @@ export default function MindFlowBrain() {
       )}
 
       {/* ─── Project Panel ────────────────────────────── */}
-      {projectPanelNode && (projectPanelNode.isProject || projectPanelNode.tag === 'مشروع') && (() => {
-        // Get live project node from state (not stale from when panel was opened)
-        const liveProject = nodes.find(n => n.id === projectPanelNode.id) || projectPanelNode;
-        // Get child nodes (phases/tasks) for navigation
-        const childNodes = nodes.filter(n => n.parentId === liveProject.id);
-        return (
-          <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 w-96 max-w-[90vw] rounded-xl border p-4 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
-            <div className="flex justify-between items-center mb-3">
-              <h3 className="text-sm font-bold">🚀 {liveProject.label}</h3>
-              <button onClick={() => { setProjectPanelNode(null); setSelectedNode(null); }} className="text-xs opacity-50 hover:opacity-100">✕</button>
-            </div>
-            <p className="text-xs opacity-70 mb-2">{liveProject.summary}</p>
-            <div className="flex gap-2 text-[10px] mb-2">
-              <span>المرحلة: <b>{liveProject.projectPhase === 'idea' ? 'فكرة' : liveProject.projectPhase === 'analysis' ? 'تحليل' : liveProject.projectPhase === 'planning' ? 'تخطيط' : liveProject.projectPhase === 'execution' ? 'تنفيذ' : liveProject.projectPhase === 'done' ? 'مكتمل ✅' : liveProject.projectPhase}</b></span>
-              <span>التقدم: <b>{liveProject.projectProgress}%</b></span>
-            </div>
-            <div className="w-full h-2 rounded-full bg-white/10 mb-3">
-              <div className="h-full rounded-full transition-all" style={{ width: `${liveProject.projectProgress}%`, background: liveProject.projectProgress === 100 ? '#34d399' : '#f59e0b' }} />
-            </div>
-            {liveProject.projectTasks.length > 0 && (
-              <div className="space-y-1 max-h-48 overflow-y-auto mb-3">
-                <p className="text-[10px] font-bold opacity-60 mb-1">📋 المهام:</p>
-                {liveProject.projectTasks.map(task => (
-                  <div key={task.id} className={`flex items-center justify-between p-1.5 rounded text-xs ${task.status === 'done' ? 'opacity-50 line-through' : ''}`}>
-                    <span>{task.status === 'done' ? '✅' : task.status === 'in-progress' ? '🔄' : '⏳'} {task.label}</span>
-                    {task.status !== 'done' && (
-                      <Button size="sm" variant="outline" className="h-5 text-[9px] px-1.5" disabled={taskExecuting === task.id}
-                        onClick={() => executeTask(task.id, task.label, liveProject.id)}>
-                        {taskExecuting === task.id ? '⏳' : '▶️'} نفّذ
-                      </Button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-            {/* Child nodes (phases) navigation */}
-            {childNodes.length > 0 && (
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                <p className="text-[10px] font-bold opacity-60 mb-1">📂 المراحل الفرعية:</p>
-                {childNodes.map(cn => (
-                  <button key={cn.id}
-                    className={`w-full text-right px-2 py-1.5 rounded text-xs flex items-center justify-between hover:bg-white/5 transition-colors`}
-                    onClick={() => { navigateToNode(cn.id); setSelectedNode(cn); setProjectPanelNode(null); }}>
-                    <span style={{ color: cn.color }}>● {cn.label}</span>
-                    <span className="opacity-50 text-[9px]">{cn.tag}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="flex gap-1 mt-3 pt-2 border-t border-white/10">
-              <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => feedBrain(liveProject.id)}>🍎 غذّ</Button>
-              <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-400" onClick={() => { deleteNode(liveProject.id); setProjectPanelNode(null); }}>🗑️ حذف</Button>
-            </div>
-          </div>
-        );
-      })()}
+      {projectPanelNode && (projectPanelNode.isProject || projectPanelNode.tag === 'مشروع') && (
+        <ProjectPanel
+          projectNode={projectPanelNode}
+          nodes={nodes}
+          theme={theme}
+          taskExecuting={taskExecuting}
+          onClose={() => { setProjectPanelNode(null); setSelectedNode(null); }}
+          onExecuteTask={executeTask}
+          onNavigate={navigateToNode}
+          onSelectNode={setSelectedNode}
+          onClosePanel={() => setProjectPanelNode(null)}
+          onFeed={feedBrain}
+          onDelete={deleteNode}
+        />
+      )}
 
       {/* ─── Quiz Panel ───────────────────────────────── */}
       {quizOpen && (
