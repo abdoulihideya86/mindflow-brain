@@ -42,11 +42,12 @@ function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; to
   return null;
 }
 
-// ─── Direct AI API call (bypasses SDK to avoid init issues) ──
+// ─── Direct AI API call with retry and timeout ──────────
 async function callAI(
   config: { baseUrl: string; apiKey: string; chatId?: string; token?: string; userId?: string },
   messages: { role: string; content: string }[],
   temperature = 0.7,
+  retries = 2,
 ): Promise<string> {
   const url = `${config.baseUrl}/chat/completions`;
   const headers: Record<string, string> = {
@@ -58,20 +59,49 @@ async function callAI(
   if (config.userId) headers['X-User-Id'] = config.userId;
   if (config.token) headers['X-Token'] = config.token;
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ messages, temperature, thinking: { type: 'disabled' } }),
-  });
+  const body = JSON.stringify({ messages, temperature, thinking: { type: 'disabled' } });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`[Brain API] AI request failed (${response.status}):`, errorBody.substring(0, 200));
-    throw new Error(`AI request failed: ${response.status}`);
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 25000); // 25s timeout
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error(`[Brain API] AI request failed (${response.status}):`, errorBody.substring(0, 200));
+        throw new Error(`خطأ من الخادم (${response.status})`);
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content || '';
+      if (!content) throw new Error('لم يتم توليد رد من الذكاء الاصطناعي');
+      return content;
+    } catch (err: unknown) {
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      const isFetchFail = err instanceof TypeError && err.message === 'fetch failed';
+      console.error(`[Brain API] Attempt ${attempt}/${retries} failed:`, err instanceof Error ? err.message : err);
+
+      if (attempt < retries && (isAbort || isFetchFail)) {
+        // Wait before retry
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+
+      if (isAbort) throw new Error('انتهت مهلة الاتصال بالذكاء الاصطناعي');
+      if (isFetchFail) throw new Error('فشل الاتصال بخادم الذكاء الاصطناعي');
+      throw err;
+    }
   }
 
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content || '';
+  throw new Error('فشل الاتصال بعد عدة محاولات');
 }
 
 export async function POST(req: NextRequest) {
@@ -274,11 +304,11 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     }
   } catch (error) {
-    console.error('[Brain API] Unhandled error:', error);
-    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Brain API] Error:', error);
+    const message = error instanceof Error ? error.message : 'حدث خطأ غير متوقع';
     return NextResponse.json({
       error: 'Failed',
-      summary: `حدث خطأ: ${message}`
+      summary: message
     }, { status: 500 });
   }
 }
