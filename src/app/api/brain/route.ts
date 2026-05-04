@@ -215,39 +215,80 @@ export async function POST(req: NextRequest) {
         const { idea } = body;
         console.log('[Brain API] analyze-idea:', idea?.substring(0, 50));
 
-        const text = await callAI(config, [
-          {
-            role: 'system',
-            content: `أنت محلل مشاريع ذكي. حوّل الفكرة التالية إلى خطة مشروع مفصلة. أجب بصيغة JSON فقط بهذا الشكل:
-{
-  "title": "اسم المشروع",
-  "description": "وصف مختصر",
-  "phases": [
-    {
-      "name": "اسم المرحلة",
-      "description": "وصف المرحلة",
-      "tasks": [
-        {"label": "اسم المهمة", "description": "وصف المهمة"}
-      ]
-    }
-  ],
-  "tags": ["تصنيف1", "تصنيف2"],
-  "estimatedNodes": 10
-}
-اجعل المشروع واقعياً وقابلاً للتنفيذ. 3-5 مراحل لكل منها 2-4 مهام. كل شيء بالعربية.`,
-          },
-          { role: 'user', content: `الفكرة: ${idea}` },
-        ], 0.7);
+        const systemPrompt = `أنت محلل مشاريع ذكي. حوّل الفكرة إلى خطة مشروع. أجب بصيغة JSON فقط بدون أي نص آخر. الصيغة المطلوبة:
+{"title":"اسم المشروع","description":"وصف مختصر","phases":[{"name":"اسم المرحلة","description":"وصف المرحلة","tasks":[{"label":"اسم المهمة","description":"وصف المهمة"}]}],"tags":["تصنيف1"],"estimatedNodes":10}
+3 مراحل لكل منها 2 مهام. كل شيء بالعربية. لا تكتب أي شيء قبل أو بعد JSON.`;
 
+        // Try up to 2 times to get valid JSON
         let analysis = null;
-        try {
-          const m = text.match(/\{[\s\S]*\}/);
-          if (m) analysis = JSON.parse(m[0]);
-        } catch (parseErr) {
-          console.error('[Brain API] JSON parse error:', parseErr);
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            const text = await callAI(config, [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `الفكرة: ${idea}` },
+            ], 0.3); // low temperature for consistent JSON output
+
+            console.log('[Brain API] AI raw response length:', text.length);
+
+            // Try to extract and parse JSON
+            const m = text.match(/\{[\s\S]*\}/);
+            if (m) {
+              try {
+                analysis = JSON.parse(m[0]);
+                if (analysis.title && analysis.phases) {
+                  console.log('[Brain API] analyze-idea: success on attempt', attempt);
+                  break;
+                }
+                analysis = null; // invalid structure, retry
+              } catch {
+                console.error('[Brain API] JSON parse failed, attempt', attempt);
+                // Try fixing common JSON issues: trailing commas, unescaped quotes
+                const fixed = m[0]
+                  .replace(/,\s*([}\]])/g, '$1') // remove trailing commas
+                  .replace(/'/g, '"'); // replace single quotes
+                try {
+                  analysis = JSON.parse(fixed);
+                  if (analysis.title && analysis.phases) {
+                    console.log('[Brain API] analyze-idea: success with fix on attempt', attempt);
+                    break;
+                  }
+                  analysis = null;
+                } catch {
+                  // Still failed, retry
+                }
+              }
+            }
+          } catch (fetchErr) {
+            console.error('[Brain API] analyze-idea fetch error on attempt', attempt, fetchErr);
+            if (attempt === 2) throw fetchErr;
+          }
         }
 
-        console.log('[Brain API] analyze-idea:', analysis ? 'success' : 'no analysis');
+        if (!analysis) {
+          // Generate a fallback analysis from the idea text
+          console.log('[Brain API] Using fallback analysis');
+          analysis = {
+            title: `مشروع: ${idea.substring(0, 40)}`,
+            description: `مشروع مبني على الفكرة: ${idea}`,
+            phases: [
+              { name: 'مرحلة التخطيط', description: 'تحديد المتطلبات وخطة العمل', tasks: [
+                { label: 'تحليل الفكرة', description: 'دراسة الفكرة وتحديد المتطلبات' },
+                { label: 'وضع خطة العمل', description: 'تحديد الخطوات والموارد اللازمة' },
+              ]},
+              { name: 'مرحلة التنفيذ', description: 'بناء وتطوير المشروع', tasks: [
+                { label: 'التطوير الأولي', description: 'بناء النسخة الأولى من المشروع' },
+                { label: 'الاختبار', description: 'اختبار المشروع وتحسينه' },
+              ]},
+              { name: 'مرحلة الإطلاق', description: 'إطلاق المشروع وتسويقه', tasks: [
+                { label: 'الإطلاق', description: 'نشر المشروع للجمهور' },
+                { label: 'التقييم', description: 'تقييم الأداء والتحسين' },
+              ]},
+            ],
+            tags: ['مشروع'],
+            estimatedNodes: 8,
+          };
+        }
+
         return NextResponse.json({ analysis });
       }
 
