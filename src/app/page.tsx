@@ -985,9 +985,9 @@ export default function MindFlowBrain() {
     setIdeaLoading(true);
     setIdeaError('');
     try {
-      // Add timeout (30 seconds) to prevent infinite loading
+      // Add timeout (90 seconds) - AI analysis can take time
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
 
       const res = await fetch('/api/brain', {
         method: 'POST',
@@ -1079,7 +1079,7 @@ export default function MindFlowBrain() {
       setIdeaDialogOpen(false); setIdeaText('');
     } catch (err: unknown) {
       const isTimeout = err instanceof DOMException && err.name === 'AbortError';
-      setIdeaError(isTimeout ? 'انتهت مهلة الاتصال. حاول مرة أخرى.' : 'خطأ في الاتصال بالخادم. تحقق من الإنترنت.');
+      setIdeaError(isTimeout ? 'انتهت مهلة الاتصال بالذكاء الاصطناعي. حاول مرة أخرى.' : 'خطأ في الاتصال بالخادم. تحقق من الإنترنت.');
       console.error('analyzeIdea error:', err);
     } finally {
       setIdeaLoading(false);
