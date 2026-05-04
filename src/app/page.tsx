@@ -1638,23 +1638,21 @@ export default function MindFlowBrain() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Track down position for click vs drag detection
-    let downPos = { x: 0, y: 0 };
-    let downNodeId: string | null = null;
+    // Track if a node was tapped (not dragged)
+    let tapNodeId: string | null = null;
     let isDragging = false;
 
     function onPointerDown(e: PointerEvent) {
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-      downPos = { x: sx, y: sy };
       isDragging = false;
+      tapNodeId = null;
 
       const hit = findNodeAt(sx, sy);
       if (hit) {
-        downNodeId = hit.id;
+        tapNodeId = hit.id;
         dragRef.current = { nodeId: hit.id, startX: sx, startY: sy, nodeStartX: hit.x, nodeStartY: hit.y, moved: false };
       } else {
-        downNodeId = null;
         // Multi-select with Shift
         if (e.shiftKey) {
           selectionRef.current = { active: true, startX: sx, startY: sy, endX: sx, endY: sy };
@@ -1673,6 +1671,7 @@ export default function MindFlowBrain() {
         if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
           dragRef.current.moved = true;
           isDragging = true;
+          tapNodeId = null; // Cancelled tap — it's a drag
         }
         if (dragRef.current.moved) {
           const vp = viewportRef.current;
@@ -1704,31 +1703,32 @@ export default function MindFlowBrain() {
         });
         setSelectedNodeIds(selected);
         selectionRef.current = { active: false, startX: 0, startY: 0, endX: 0, endY: 0 };
-        dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
-        panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
+        cleanup();
         return;
       }
 
-      // If we were dragging a node, just stop dragging (don't select)
-      if (isDragging) {
-        dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
-        panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
-        isDragging = false;
-        downNodeId = null;
-        return;
+      // TAP on a node (not dragged) — SELECT it!
+      if (tapNodeId && !isDragging) {
+        const hitNode = nodesRef.current.find(n => n.id === tapNodeId);
+        if (hitNode) {
+          console.log('[MindFlow] TAP on node:', hitNode.label);
+          handleNodeClick(hitNode);
+        }
+      } else if (!tapNodeId && !isDragging && panRef.current.active) {
+        // Tapped on empty space — deselect
+        setSelectedNode(null);
+        setSelectedNodeIds(new Set());
+        setProjectPanelNode(null);
       }
 
-      // If we panned, just stop panning (don't select)
-      if (panRef.current.active) {
-        panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
-        dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
-        downNodeId = null;
-        return;
-      }
+      cleanup();
+    }
 
+    function cleanup() {
       dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
       panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
-      downNodeId = null;
+      isDragging = false;
+      tapNodeId = null;
     }
 
     function onWheel(e: WheelEvent) {
@@ -1758,36 +1758,12 @@ export default function MindFlowBrain() {
       }
     }
 
-    // Primary click handler — simple and reliable
-    function onClick(e: MouseEvent) {
-      const rect = canvas!.getBoundingClientRect();
-      const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-
-      // If we just finished dragging, don't treat as click
-      if (isDragging) {
-        isDragging = false;
-        return;
-      }
-
-      const hit = findNodeAt(sx, sy);
-      console.log('[MindFlow] Click at screen:', sx, sy, '| hit:', hit ? hit.label : 'none', '| nodes count:', nodesRef.current.length);
-      if (hit) {
-        handleNodeClick(hit);
-      } else {
-        // Clicked on empty space — deselect
-        setSelectedNode(null);
-        setSelectedNodeIds(new Set());
-        setProjectPanelNode(null);
-      }
-    }
-
     canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
     canvas.addEventListener('pointermove', onPointerMove, { passive: false });
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('dblclick', onDblClick);
-    canvas.addEventListener('click', onClick);
     // Prevent default touch behaviors (scrolling, zooming) that block interaction
     canvas.addEventListener('touchstart', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
     canvas.addEventListener('touchmove', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
@@ -1798,7 +1774,6 @@ export default function MindFlowBrain() {
       canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('dblclick', onDblClick);
-      canvas.removeEventListener('click', onClick);
     };
   }, [findNodeAt, connectMode, connectFrom, connectNodes, expandNode, feedBrain, handleNodeClick]);
 
@@ -2150,7 +2125,7 @@ export default function MindFlowBrain() {
 
       {/* ─── Add Node Dialog ──────────────────────────── */}
       <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-        <DialogContent className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
+        <DialogContent aria-describedby={undefined} className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
           <DialogHeader><DialogTitle>➕ إضافة عقدة جديدة</DialogTitle></DialogHeader>
           <div className="space-y-3 pt-2">
             <Input value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="اسم العقدة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} />
@@ -2163,7 +2138,7 @@ export default function MindFlowBrain() {
 
       {/* ─── Idea Dialog ──────────────────────────────── */}
       <Dialog open={ideaDialogOpen} onOpenChange={setIdeaDialogOpen}>
-        <DialogContent className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
+        <DialogContent aria-describedby={undefined} className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
           <DialogHeader><DialogTitle>💡 حوّل فكرتك إلى مشروع</DialogTitle></DialogHeader>
           <div className="space-y-3 pt-2">
             <Textarea value={ideaText} onChange={e => setIdeaText(e.target.value)} placeholder="اكتب فكرتك هنا... وسيتولى الذكاء الاصطناعي تحويلها إلى خطة مشروع مفصلة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={4} />

@@ -5,7 +5,14 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action } = body;
-    const zai = await ZAI.create();
+
+    let zai;
+    try {
+      zai = await ZAI.create();
+    } catch (sdkError) {
+      console.error('ZAI SDK init error:', sdkError);
+      return NextResponse.json({ error: 'AI service unavailable', summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً' }, { status: 503 });
+    }
 
     switch (action) {
       case 'summarize': {
