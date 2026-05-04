@@ -3,11 +3,36 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-// ─── Robust config loader: env vars → file fallback ──────────
+// ─── Parse .env file manually (standalone server doesn't load it) ──
+function loadDotEnv(): void {
+  try {
+    const envPath = join(process.cwd(), '.env');
+    const envContent = readFileSync(envPath, 'utf-8');
+    for (const line of envContent.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIndex = trimmed.indexOf('=');
+      if (eqIndex === -1) continue;
+      const key = trimmed.substring(0, eqIndex).trim();
+      const value = trimmed.substring(eqIndex + 1).trim();
+      // Only set if not already defined
+      if (!process.env[key]) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // .env not found, that's ok
+  }
+}
+
+// ─── Load .env once at module level (runs on first import) ───
+loadDotEnv();
+
+// ─── Robust config loader: env vars → .z-ai-config → /etc ───
 function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; token?: string; userId?: string } | null {
-  // 1) Try environment variables
+  // 1) Try environment variables (now includes .env loaded above)
   if (process.env.ZAI_BASE_URL && process.env.ZAI_API_KEY) {
-    console.log('[Brain API] Config from env vars');
+    console.log('[Brain API] Config from env vars / .env');
     return {
       baseUrl: process.env.ZAI_BASE_URL,
       apiKey: process.env.ZAI_API_KEY,
@@ -17,7 +42,7 @@ function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; to
     };
   }
 
-  // 2) Try config files
+  // 2) Try .z-ai-config JSON files
   const configPaths = [
     join(process.cwd(), '.z-ai-config'),
     join(homedir(), '.z-ai-config'),
