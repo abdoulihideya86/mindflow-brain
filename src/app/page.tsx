@@ -331,6 +331,7 @@ export default function MindFlowBrain() {
   const [ideaDialogOpen, setIdeaDialogOpen] = useState(false);
   const [ideaText, setIdeaText] = useState('');
   const [ideaLoading, setIdeaLoading] = useState(false);
+  const [ideaError, setIdeaError] = useState('');
   const [projectPanelNode, setProjectPanelNode] = useState<MindNode | null>(null);
   const [taskExecuting, setTaskExecuting] = useState<string | null>(null);
 
@@ -982,84 +983,103 @@ export default function MindFlowBrain() {
   const analyzeIdea = useCallback(async () => {
     if (!ideaText.trim()) return;
     setIdeaLoading(true);
+    setIdeaError('');
     try {
+      // Add timeout (30 seconds) to prevent infinite loading
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
       const res = await fetch('/api/brain', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'analyze-idea', idea: ideaText.trim() }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
+
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        console.error('analyzeIdea API error:', res.status, errData);
+        let errMsg = `خطأ في الخادم (${res.status})`;
+        try {
+          const errData = await res.json();
+          errMsg = errData.summary || errData.error || errMsg;
+        } catch { /* */ }
+        setIdeaError(errMsg);
         return;
       }
+
       const data = await res.json();
-      if (data.analysis) {
-        pushHistory();
-        const analysis: ProjectAnalysis = data.analysis;
-        const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
-        if (!brain) return;
-
-        const projectAngle = Math.random() * Math.PI * 2;
-        const projectDist = 300;
-        const projectNode = makeNode({
-          id: nid(), label: `🚀 ${analysis.title}`, tag: analysis.tags?.[0] || 'مشروع',
-          summary: analysis.description,
-          x: brain.x + Math.cos(projectAngle) * projectDist,
-          y: brain.y + Math.sin(projectAngle) * projectDist,
-          depth: 1, parentId: BRAIN_ID, isCustom: true,
-          connections: [BRAIN_ID], color: '#f59e0b',
-          isProject: true, projectPhase: 'planning', projectProgress: 0,
-          projectTasks: analysis.phases.flatMap(p =>
-            p.tasks.map(t => ({ id: nid(), label: t.label, status: 'pending' as const }))
-          ),
-          knowledgeLevel: 30, maturity: 'sprout', visitCount: 3,
-        });
-
-        const newNodes = [projectNode];
-        const newEdges: MindEdge[] = [{ id: eid(), from: BRAIN_ID, to: projectNode.id, type: 'project', strength: 1, animated: true, createdAt: Date.now() }];
-
-        // Create phase sub-nodes
-        analysis.phases.forEach((phase, pi) => {
-          const phaseAngle = projectAngle + (pi / analysis.phases.length) * Math.PI * 2;
-          const phaseDist = 180;
-          const phaseNode = makeNode({
-            id: nid(), label: phase.name, tag: 'مرحلة', summary: phase.description,
-            x: projectNode.x + Math.cos(phaseAngle) * phaseDist,
-            y: projectNode.y + Math.sin(phaseAngle) * phaseDist,
-            depth: 2, parentId: projectNode.id, color: '#f59e0b',
-            connections: [projectNode.id], knowledgeLevel: 10,
-          });
-          newNodes.push(phaseNode);
-          newEdges.push({ id: eid(), from: projectNode.id, to: phaseNode.id, type: 'project', strength: 0.8, animated: true, createdAt: Date.now() });
-
-          // Task sub-nodes
-          phase.tasks.forEach((task, ti) => {
-            const taskAngle = phaseAngle + (ti / phase.tasks.length) * Math.PI * 1.5 - 0.3;
-            const taskDist = 120;
-            const taskNode = makeNode({
-              id: nid(), label: task.label, tag: 'مهمة', summary: task.description,
-              x: phaseNode.x + Math.cos(taskAngle) * taskDist,
-              y: phaseNode.y + Math.sin(taskAngle) * taskDist,
-              depth: 3, parentId: phaseNode.id, color: '#34d399',
-              connections: [phaseNode.id], knowledgeLevel: 0,
-              isProject: false,
-              projectTasks: [{ id: nid(), label: task.label, status: 'pending' }],
-            });
-            newNodes.push(taskNode);
-            newEdges.push({ id: eid(), from: phaseNode.id, to: taskNode.id, type: 'project', strength: 0.6, animated: true, createdAt: Date.now() });
-          });
-        });
-
-        setNodes(prev => [...prev, ...newNodes]);
-        setEdges(prev => [...prev, ...newEdges]);
-        setBrainStats(prev => ({
-          ...prev, totalNodes: prev.totalNodes + newNodes.length, totalConnections: prev.totalConnections + newEdges.length,
-          projectsCreated: prev.projectsCreated + 1, totalKnowledge: prev.totalKnowledge + 20,
-        }));
-        sounds.levelUp(); addTimeline('project', `مشروع جديد: ${analysis.title}`);
-        setIdeaDialogOpen(false); setIdeaText('');
+      if (!data.analysis) {
+        setIdeaError('لم يتم توليد خطة المشروع. حاول مرة أخرى.');
+        return;
       }
-    } catch (err) {
+
+      pushHistory();
+      const analysis: ProjectAnalysis = data.analysis;
+      const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
+      if (!brain) { setIdeaError('لم يتم العثور على العقل المركزي'); return; }
+
+      const projectAngle = Math.random() * Math.PI * 2;
+      const projectDist = 300;
+      const projectNode = makeNode({
+        id: nid(), label: `🚀 ${analysis.title}`, tag: analysis.tags?.[0] || 'مشروع',
+        summary: analysis.description,
+        x: brain.x + Math.cos(projectAngle) * projectDist,
+        y: brain.y + Math.sin(projectAngle) * projectDist,
+        depth: 1, parentId: BRAIN_ID, isCustom: true,
+        connections: [BRAIN_ID], color: '#f59e0b',
+        isProject: true, projectPhase: 'planning', projectProgress: 0,
+        projectTasks: analysis.phases.flatMap(p =>
+          p.tasks.map(t => ({ id: nid(), label: t.label, status: 'pending' as const }))
+        ),
+        knowledgeLevel: 30, maturity: 'sprout', visitCount: 3,
+      });
+
+      const newNodes = [projectNode];
+      const newEdges: MindEdge[] = [{ id: eid(), from: BRAIN_ID, to: projectNode.id, type: 'project', strength: 1, animated: true, createdAt: Date.now() }];
+
+      // Create phase sub-nodes
+      analysis.phases.forEach((phase, pi) => {
+        const phaseAngle = projectAngle + (pi / analysis.phases.length) * Math.PI * 2;
+        const phaseDist = 180;
+        const phaseNode = makeNode({
+          id: nid(), label: phase.name, tag: 'مرحلة', summary: phase.description,
+          x: projectNode.x + Math.cos(phaseAngle) * phaseDist,
+          y: projectNode.y + Math.sin(phaseAngle) * phaseDist,
+          depth: 2, parentId: projectNode.id, color: '#f59e0b',
+          connections: [projectNode.id], knowledgeLevel: 10,
+        });
+        newNodes.push(phaseNode);
+        newEdges.push({ id: eid(), from: projectNode.id, to: phaseNode.id, type: 'project', strength: 0.8, animated: true, createdAt: Date.now() });
+
+        // Task sub-nodes
+        phase.tasks.forEach((task, ti) => {
+          const taskAngle = phaseAngle + (ti / phase.tasks.length) * Math.PI * 1.5 - 0.3;
+          const taskDist = 120;
+          const taskNode = makeNode({
+            id: nid(), label: task.label, tag: 'مهمة', summary: task.description,
+            x: phaseNode.x + Math.cos(taskAngle) * taskDist,
+            y: phaseNode.y + Math.sin(taskAngle) * taskDist,
+            depth: 3, parentId: phaseNode.id, color: '#34d399',
+            connections: [phaseNode.id], knowledgeLevel: 0,
+            isProject: false,
+            projectTasks: [{ id: nid(), label: task.label, status: 'pending' }],
+          });
+          newNodes.push(taskNode);
+          newEdges.push({ id: eid(), from: phaseNode.id, to: taskNode.id, type: 'project', strength: 0.6, animated: true, createdAt: Date.now() });
+        });
+      });
+
+      setNodes(prev => [...prev, ...newNodes]);
+      setEdges(prev => [...prev, ...newEdges]);
+      setBrainStats(prev => ({
+        ...prev, totalNodes: prev.totalNodes + newNodes.length, totalConnections: prev.totalConnections + newEdges.length,
+        projectsCreated: prev.projectsCreated + 1, totalKnowledge: prev.totalKnowledge + 20,
+      }));
+      sounds.levelUp(); addTimeline('project', `مشروع جديد: ${analysis.title}`);
+      setIdeaDialogOpen(false); setIdeaText('');
+    } catch (err: unknown) {
+      const isTimeout = err instanceof DOMException && err.name === 'AbortError';
+      setIdeaError(isTimeout ? 'انتهت مهلة الاتصال. حاول مرة أخرى.' : 'خطأ في الاتصال بالخادم. تحقق من الإنترنت.');
       console.error('analyzeIdea error:', err);
     } finally {
       setIdeaLoading(false);
@@ -2216,18 +2236,19 @@ export default function MindFlowBrain() {
             <Input value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="اسم العقدة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} />
             <Input value={newTag} onChange={e => setNewTag(e.target.value)} placeholder="التصنيف (اختياري)" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} />
             <Textarea value={newSummary} onChange={e => setNewSummary(e.target.value)} placeholder="وصف مختصر (اختياري)" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={2} />
-            <Button className="w-full" onClick={(e) => { e.stopPropagation(); addCustomNode(); }} disabled={!newLabel.trim()}>إضافة</Button>
+            <Button className="w-full" onClick={addCustomNode} disabled={!newLabel.trim()}>إضافة</Button>
           </div>
         </DialogContent>
       </Dialog>
 
       {/* ─── Idea Dialog ──────────────────────────────── */}
-      <Dialog open={ideaDialogOpen} onOpenChange={setIdeaDialogOpen}>
+      <Dialog open={ideaDialogOpen} onOpenChange={(open) => { setIdeaDialogOpen(open); if (!open) { setIdeaError(''); setIdeaLoading(false); } }}>
         <DialogContent aria-describedby={undefined} className={`${theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''} pointer-events-auto`}>
           <DialogHeader><DialogTitle>💡 حوّل فكرتك إلى مشروع</DialogTitle></DialogHeader>
           <div className="space-y-3 pt-2">
-            <Textarea value={ideaText} onChange={e => setIdeaText(e.target.value)} placeholder="اكتب فكرتك هنا... وسيتولى الذكاء الاصطناعي تحويلها إلى خطة مشروع مفصلة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={4} />
-            <Button className="w-full" onClick={(e) => { e.stopPropagation(); analyzeIdea(); }} disabled={!ideaText.trim() || ideaLoading}>
+            <Textarea value={ideaText} onChange={e => { setIdeaText(e.target.value); setIdeaError(''); }} placeholder="اكتب فكرتك هنا... وسيتولى الذكاء الاصطناعي تحويلها إلى خطة مشروع مفصلة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={4} />
+            {ideaError && <p className="text-xs text-red-400 bg-red-900/20 p-2 rounded">{ideaError}</p>}
+            <Button className="w-full" onClick={analyzeIdea} disabled={!ideaText.trim() || ideaLoading}>
               {ideaLoading ? '⏳ جاري التحليل...' : '🚀 حلّل وأنشئ المشروع'}
             </Button>
             {ideaLoading && <p className="text-xs text-center animate-pulse opacity-70">⏳ جاري التحليل... قد يستغرق بضع ثوان</p>}
