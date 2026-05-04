@@ -869,7 +869,7 @@ export default function MindFlowBrain() {
         });
         sounds.aiInsight(); addTimeline('ai-insight', 'اقتراح روابط ذكية');
       }
-    } catch { /* */ }
+    } catch (err) { console.error('aiSuggestLinks error:', err); }
     setAiLoading(false);
   }, [addTimeline, connectNodes]);
 
@@ -900,7 +900,7 @@ export default function MindFlowBrain() {
         sounds.aiInsight(); addTimeline('ai-insight', `AI ولّد ${newNodes.length} عقد`);
         setTimeout(() => { newNodes.forEach((n, i) => { setTimeout(() => feedBrain(n.id), i * 150); }); }, 200);
       }
-    } catch { /* */ }
+    } catch (err) { console.error('aiGenerateNodes error:', err); }
     setAiLoading(false);
   }, [feedBrain, addTimeline, pushHistory]);
 
@@ -987,6 +987,11 @@ export default function MindFlowBrain() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'analyze-idea', idea: ideaText.trim() }),
       });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        console.error('analyzeIdea API error:', res.status, errData);
+        return;
+      }
       const data = await res.json();
       if (data.analysis) {
         pushHistory();
@@ -1054,8 +1059,11 @@ export default function MindFlowBrain() {
         sounds.levelUp(); addTimeline('project', `مشروع جديد: ${analysis.title}`);
         setIdeaDialogOpen(false); setIdeaText('');
       }
-    } catch { /* */ }
-    setIdeaLoading(false);
+    } catch (err) {
+      console.error('analyzeIdea error:', err);
+    } finally {
+      setIdeaLoading(false);
+    }
   }, [ideaText, feedBrain, addTimeline, pushHistory]);
 
   const executeTask = useCallback(async (taskId: string, taskLabel: string, parentNodeId: string) => {
@@ -2202,26 +2210,27 @@ export default function MindFlowBrain() {
 
       {/* ─── Add Node Dialog ──────────────────────────── */}
       <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-        <DialogContent aria-describedby={undefined} className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
+        <DialogContent aria-describedby={undefined} className={`${theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''} pointer-events-auto`}>
           <DialogHeader><DialogTitle>➕ إضافة عقدة جديدة</DialogTitle></DialogHeader>
           <div className="space-y-3 pt-2">
             <Input value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="اسم العقدة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} />
             <Input value={newTag} onChange={e => setNewTag(e.target.value)} placeholder="التصنيف (اختياري)" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} />
             <Textarea value={newSummary} onChange={e => setNewSummary(e.target.value)} placeholder="وصف مختصر (اختياري)" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={2} />
-            <Button className="w-full" onClick={addCustomNode} disabled={!newLabel.trim()}>إضافة</Button>
+            <Button className="w-full" onClick={(e) => { e.stopPropagation(); addCustomNode(); }} disabled={!newLabel.trim()}>إضافة</Button>
           </div>
         </DialogContent>
       </Dialog>
 
       {/* ─── Idea Dialog ──────────────────────────────── */}
       <Dialog open={ideaDialogOpen} onOpenChange={setIdeaDialogOpen}>
-        <DialogContent aria-describedby={undefined} className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
+        <DialogContent aria-describedby={undefined} className={`${theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''} pointer-events-auto`}>
           <DialogHeader><DialogTitle>💡 حوّل فكرتك إلى مشروع</DialogTitle></DialogHeader>
           <div className="space-y-3 pt-2">
             <Textarea value={ideaText} onChange={e => setIdeaText(e.target.value)} placeholder="اكتب فكرتك هنا... وسيتولى الذكاء الاصطناعي تحويلها إلى خطة مشروع مفصلة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={4} />
-            <Button className="w-full" onClick={analyzeIdea} disabled={!ideaText.trim() || ideaLoading}>
+            <Button className="w-full" onClick={(e) => { e.stopPropagation(); analyzeIdea(); }} disabled={!ideaText.trim() || ideaLoading}>
               {ideaLoading ? '⏳ جاري التحليل...' : '🚀 حلّل وأنشئ المشروع'}
             </Button>
+            {ideaLoading && <p className="text-xs text-center animate-pulse opacity-70">⏳ جاري التحليل... قد يستغرق بضع ثوان</p>}
           </div>
         </DialogContent>
       </Dialog>
