@@ -4,8 +4,21 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-// ─── Robust config loader ───────────────────────────────
+// ─── Robust config loader: env vars FIRST, then file fallback ───
 function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; token?: string; userId?: string } | null {
+  // 1) Try environment variables first (always available in deployed env)
+  if (process.env.ZAI_BASE_URL && process.env.ZAI_API_KEY) {
+    console.log('[Brain API] Loaded config from environment variables');
+    return {
+      baseUrl: process.env.ZAI_BASE_URL,
+      apiKey: process.env.ZAI_API_KEY,
+      chatId: process.env.ZAI_CHAT_ID,
+      token: process.env.ZAI_TOKEN,
+      userId: process.env.ZAI_USER_ID,
+    };
+  }
+
+  // 2) Fallback to config files
   const configPaths = [
     join(process.cwd(), '.z-ai-config'),
     join(homedir(), '.z-ai-config'),
@@ -16,7 +29,7 @@ function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; to
       const configStr = readFileSync(filePath, 'utf-8');
       const config = JSON.parse(configStr);
       if (config.baseUrl && config.apiKey) {
-        console.log(`[Brain API] Loaded config from: ${filePath}`);
+        console.log(`[Brain API] Loaded config from file: ${filePath}`);
         return config;
       }
     } catch (err: unknown) {
@@ -26,6 +39,8 @@ function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; to
       }
     }
   }
+
+  console.error('[Brain API] No config found: env vars missing and no config file');
   return null;
 }
 
@@ -34,18 +49,16 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { action } = body;
 
-    // Initialize ZAI SDK with manual config loading (more robust than ZAI.create())
+    // Initialize ZAI SDK
     let zai: InstanceType<typeof ZAI>;
     try {
       const config = loadZAIConfig();
       if (!config) {
-        console.error('[Brain API] No valid .z-ai-config found in any location');
         return NextResponse.json({
           error: 'AI service unavailable',
-          summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً — لم يتم العثور على ملف الإعداد'
+          summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً'
         }, { status: 503 });
       }
-      // Use the ZAI constructor directly with our loaded config
       zai = new ZAI(config);
       console.log('[Brain API] ZAI SDK initialized successfully');
     } catch (sdkError) {
