@@ -1149,7 +1149,6 @@ export default function MindFlowBrain() {
     setCodeFiles([]);
     setSelectedCodeFile(null);
     try {
-      // Gather project context: idea, phases, tasks
       const idea = projectNode.summary || projectNode.label;
       const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
       const phases = phaseNodes.map(pn => {
@@ -1160,14 +1159,17 @@ export default function MindFlowBrain() {
           tasks: taskNodes.map(tn => ({ label: tn.label, description: tn.summary || '' })),
         };
       });
-      // Also include flat tasks from the project node
       const flatTasks = projectNode.projectTasks || [];
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s
       const res = await fetch('/api/brain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'generate-code', idea, phases, tasks: flatTasks }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       const data = await res.json();
       if (data.files?.length) {
         setCodeFiles(data.files);
@@ -1197,11 +1199,15 @@ export default function MindFlowBrain() {
       });
       const flatTasks = projectNode.projectTasks || [];
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s
       const res = await fetch('/api/brain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'generate-preview', idea, phases, tasks: flatTasks }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       const data = await res.json();
       if (data.html) {
         setPreviewHtml(data.html);
@@ -1230,11 +1236,15 @@ export default function MindFlowBrain() {
       });
       const flatTasks = projectNode.projectTasks || [];
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s
       const res = await fetch('/api/brain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'generate-report', idea, phases, tasks: flatTasks }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       const data = await res.json();
       if (data.report) {
         setReportData(data.report);

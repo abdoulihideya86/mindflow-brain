@@ -13,6 +13,7 @@ const AI_CONFIG = {
 async function callAI(
   messages: { role: string; content: string }[],
   temperature = 0.7,
+  timeoutMs = 60000,
 ): Promise<string> {
   const url = `${AI_CONFIG.baseUrl}/chat/completions`;
   const headers: Record<string, string> = {
@@ -27,7 +28,7 @@ async function callAI(
   const body = JSON.stringify({ messages, temperature, thinking: { type: 'disabled' } });
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000); // 60s
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     console.log(`[Brain API] Calling ${url}`);
@@ -331,20 +332,19 @@ export async function POST(req: NextRequest) {
           `مرحلة: ${p.name} - ${p.description}\nالمهام: ${p.tasks?.map((t: { label: string; description: string }) => `${t.label} (${t.description})`).join(', ')}`
         ).join('\n');
 
-        const systemPrompt = `أنت مطور واجهات أمامية محترف. قم بتوليد صفحة HTML واحدة مستقلة (مع CSS و JS مدمجين) تمثل واجهة المستخدم للمشروع. الصفحة يجب أن تكون:
-1. تصميم احترافي وجذاب
-2. دعم اللغة العربية (RTL) بالكامل
-3. تصميم متجاوب (responsive)
-4. تفاعلية مع تأثيرات حركية جميلة
-5. ألوان متناسقة وخطوط واضحة
-6. تحتوي على: شريط تنقل، قسم بطولي، قسم الميزات، قسم التواصل، تذييل
-7. أجب بـ HTML فقط بدون أي نص آخر. لا تكتب \`\`\`html أو أي شيء قبل أو بعد الكود.
-8. اجعل الصفحة تعمل بشكل مستقل بدون أي مكتبات خارجية (استخدم CSS خالص أو CDN فقط)`;
+        const systemPrompt = `أنت مطور واجهات. ولّد صفحة HTML واحدة مستقلة (CSS+JS مدمج) للمشروع. شروط: RTL عربي، متجاوب، احترافي، ألوان متناسقة. تحتوي: شريط تنقل، قسم بطولي، ميزات، تذييل. أجب بـ HTML فقط بدون markdown أو نص آخر. لا تستخدم مكتبات خارجية.`;
 
-        const html = await callAI([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `فكرة المشروع: ${idea}\n\nالمراحل والمهام:\n${phasesDesc || 'غير محدد'}` },
-        ], 0.3);
+        let html = '';
+        try {
+          html = await callAI([
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `المشروع: ${idea}` },
+          ], 0.3, 90000); // 90s timeout for large HTML
+        } catch (err) {
+          console.error('[Brain API] generate-preview AI failed:', err instanceof Error ? err.message : String(err));
+          // Fallback: simple HTML preview
+          html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${idea}</title><style>*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Tahoma,sans-serif}body{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;min-height:100vh;display:flex;flex-direction:column}header{padding:20px;background:rgba(0,0,0,0.2)}header h1{font-size:1.5rem}main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;text-align:center}main h2{font-size:3rem;margin-bottom:20px}main p{font-size:1.2rem;opacity:0.8;max-width:600px}footer{padding:20px;background:rgba(0,0,0,0.3);text-align:center;font-size:0.9rem;opacity:0.7}</style></head><body><header><h1>${idea}</h1></header><main><h2>مرحباً بكم</h2><p>هذه معاينة أولية للمشروع - ${idea}</p></main><footer>توليد تلقائي بواسطة MindFlow Brain</footer></body></html>`;
+        }
 
         // Strip markdown code fences if present
         let cleanHtml = html.trim();
