@@ -158,7 +158,7 @@ function saveState(stats: BrainStats, customNodes: MindNode[], exploredTopics: s
 }
 
 // ─── Project Panel Component ──────────────────────────────
-function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExecuteTask, onNavigate, onSelectNode, onClosePanel, onFeed, onDelete, onGenerateCode, onGeneratePreview, onGenerateReport }: {
+function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExecuteTask, onNavigate, onSelectNode, onClosePanel, onFeed, onDelete, onGenerateCode, onGeneratePreview, onGenerateReport, onExecuteAll }: {
   projectNode: MindNode;
   nodes: MindNode[];
   theme: ThemeMode;
@@ -173,6 +173,7 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
   onGenerateCode: (projectNode: MindNode) => void;
   onGeneratePreview: (projectNode: MindNode) => void;
   onGenerateReport: (projectNode: MindNode) => void;
+  onExecuteAll: (parentNodeId: string) => void;
 }) {
   // Get live project node from state (not stale from when panel was opened)
   const liveProject = nodes.find(n => n.id === projectNode.id) || projectNode;
@@ -181,33 +182,46 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
   const tasks = liveProject.projectTasks || [];
   const progress = liveProject.projectProgress ?? 0;
   const phase = liveProject.projectPhase || 'idea';
+  const isProjectRoot = liveProject.isProject;
+
+  // For phase nodes, also collect tasks from child task nodes
+  const allTasks = isProjectRoot ? tasks : (() => {
+    // Phase node: gather tasks from child task nodes + own projectTasks
+    const childTasks = childNodes.flatMap(cn => cn.projectTasks || []);
+    return [...tasks, ...childTasks];
+  })();
 
   const phaseLabels: Record<string, string> = {
     idea: 'فكرة', analysis: 'تحليل', planning: 'تخطيط', execution: 'تنفيذ', done: 'مكتمل ✅',
   };
 
+  const pendingTasks = allTasks.filter(t => t.status !== 'done');
+
   return (
     <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 w-96 max-w-[90vw] rounded-xl border p-4 pointer-events-auto ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
       <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-bold">🚀 {liveProject.label || 'مشروع'}</h3>
+        <h3 className="text-sm font-bold">{isProjectRoot ? '🚀' : '📂'} {liveProject.label || 'مشروع'}</h3>
         <button onClick={onClose} className="text-xs opacity-50 hover:opacity-100">✕</button>
       </div>
       {liveProject.summary && <p className="text-xs opacity-70 mb-2">{liveProject.summary}</p>}
       <div className="flex gap-2 text-[10px] mb-2">
         <span>المرحلة: <b>{phaseLabels[phase] || phase}</b></span>
         <span>التقدم: <b>{progress}%</b></span>
+        {!isProjectRoot && <span className="opacity-50">(مرحلة فرعية)</span>}
       </div>
+      {/* Progress bar */}
       <div className="w-full h-2 rounded-full bg-white/10 mb-3">
         <div className="h-full rounded-full transition-all" style={{ width: `${progress}%`, background: progress === 100 ? '#34d399' : '#f59e0b' }} />
       </div>
+      {/* Tasks from this node's projectTasks */}
       {tasks.length > 0 && (
-        <div className="space-y-1 max-h-48 overflow-y-auto mb-3">
+        <div className="space-y-1 max-h-40 overflow-y-auto mb-3">
           <p className="text-[10px] font-bold opacity-60 mb-1">📋 المهام:</p>
           {tasks.map(task => (
             <div key={task.id} className={`flex items-center justify-between p-1.5 rounded text-xs ${task.status === 'done' ? 'opacity-50 line-through' : ''}`}>
-              <span>{task.status === 'done' ? '✅' : task.status === 'in-progress' ? '🔄' : '⏳'} {task.label}</span>
+              <span className="flex-1">{task.status === 'done' ? '✅' : task.status === 'in-progress' ? '🔄' : '⏳'} {task.label}</span>
               {task.status !== 'done' && (
-                <Button size="sm" variant="outline" className="h-5 text-[9px] px-1.5" disabled={taskExecuting === task.id}
+                <Button size="sm" variant="outline" className="h-5 text-[9px] px-1.5 shrink-0" disabled={taskExecuting === task.id}
                   onClick={() => onExecuteTask(task.id, task.label, liveProject.id)}>
                   {taskExecuting === task.id ? '⏳' : '▶️'} نفّذ
                 </Button>
@@ -216,27 +230,104 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
           ))}
         </div>
       )}
-      {/* Child nodes (phases) navigation */}
+      {/* Child nodes (phases for project, tasks for phase) with progress */}
       {childNodes.length > 0 && (
-        <div className="space-y-1 max-h-32 overflow-y-auto">
-          <p className="text-[10px] font-bold opacity-60 mb-1">📂 المراحل الفرعية:</p>
-          {childNodes.map(cn => (
-            <button key={cn.id}
-              className="w-full text-right px-2 py-1.5 rounded text-xs flex items-center justify-between hover:bg-white/5 transition-colors"
-              onClick={() => { onNavigate(cn.id); onSelectNode(cn); onClosePanel(); }}>
-              <span style={{ color: cn.color }}>● {cn.label}</span>
-              <span className="opacity-50 text-[9px]">{cn.tag}</span>
-            </button>
-          ))}
+        <div className="space-y-1 max-h-40 overflow-y-auto mb-2">
+          <p className="text-[10px] font-bold opacity-60 mb-1">{isProjectRoot ? '📂 المراحل الفرعية:' : '📋 المهام الفرعية:'}</p>
+          {childNodes.map(cn => {
+            const cnProgress = cn.projectProgress ?? 0;
+            const cnTasks = cn.projectTasks || [];
+            const cnDone = cnTasks.filter(t => t.status === 'done').length;
+            const cnTotal = cnTasks.length;
+            return (
+              <div key={cn.id}>
+                <button className="w-full text-right px-2 py-1.5 rounded text-xs flex items-center justify-between hover:bg-white/5 transition-colors"
+                  onClick={() => { onNavigate(cn.id); onSelectNode(cn); onClosePanel(); }}>
+                  <span style={{ color: cn.color }}>● {cn.label}</span>
+                  <span className="opacity-50 text-[9px]">{cn.tag} {cnTotal > 0 ? `(${cnDone}/${cnTotal})` : ''}</span>
+                </button>
+                {/* Progress bar for child phase */}
+                {(cnProgress > 0 || cnTotal > 0) && (
+                  <div className="w-full h-1 rounded-full bg-white/5 mx-2 mb-1" style={{ width: 'calc(100% - 16px)' }}>
+                    <div className="h-full rounded-full transition-all" style={{ width: `${cnProgress || (cnTotal > 0 ? Math.round(cnDone / cnTotal * 100) : 0)}%`, background: cnProgress === 100 ? '#34d399' : '#f59e0b' }} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
+      {/* Action buttons */}
       <div className="flex gap-1 mt-3 pt-2 border-t border-white/10 flex-wrap">
-        <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGenerateCode(liveProject)}>🔧 كود</Button>
-        <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGeneratePreview(liveProject)}>🌐 معاينة</Button>
-        <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGenerateReport(liveProject)}>📄 تقرير</Button>
+        {isProjectRoot && (
+          <>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGenerateCode(liveProject)}>🔧 كود</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGeneratePreview(liveProject)}>🌐 معاينة</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGenerateReport(liveProject)}>📄 تقرير</Button>
+          </>
+        )}
+        {pendingTasks.length > 0 && (
+          <Button size="sm" variant="outline" className="h-6 text-[10px] text-cyan-400" onClick={() => onExecuteAll(liveProject.id)} disabled={!!taskExecuting}>
+            ⚡ تنفيذ الكل
+          </Button>
+        )}
         <div className="flex-1" />
         <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onFeed(liveProject.id)}>🍎 غذّ</Button>
         <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-400" onClick={() => { onDelete(liveProject.id); onClose(); }}>🗑️ حذف</Button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Live Output Panel Component ──────────────────────────
+function LivePanel({ open, title, type, content, fullContent, onClose, onCopy, onOpenNew, onDownload }: {
+  open: boolean;
+  title: string;
+  type: 'planning' | 'code' | 'preview' | 'report';
+  content: string;
+  fullContent: string;
+  onClose: () => void;
+  onCopy: () => void;
+  onOpenNew: () => void;
+  onDownload: () => void;
+}) {
+  const contentRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = contentRef.current.scrollHeight;
+  }, [content]);
+
+  if (!open) return null;
+
+  const typeEmoji = type === 'code' ? '🔧' : type === 'preview' ? '🌐' : type === 'report' ? '📄' : '🧠';
+  const typeLabel = type === 'code' ? 'توليد الكود' : type === 'preview' ? 'المعاينة' : type === 'report' ? 'التقرير' : 'التخطيط';
+
+  return (
+    <div className="fixed top-0 left-0 h-full z-40 pointer-events-auto" style={{ width: '420px', maxWidth: '90vw' }}>
+      <div className="h-full flex flex-col bg-gray-950 text-gray-100 border-l border-gray-800 shadow-2xl">
+        {/* Title bar */}
+        <div className="flex items-center justify-between px-3 py-2 border-b border-gray-800 bg-gray-900">
+          <div className="flex items-center gap-2">
+            <span className="text-sm">{typeEmoji}</span>
+            <span className="text-xs font-bold text-cyan-400">{typeLabel}</span>
+            <span className="text-[10px] text-gray-500">— {title}</span>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm px-1">✕</button>
+        </div>
+        {/* Content area */}
+        <pre ref={contentRef} className="flex-1 overflow-auto p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words" dir="ltr" style={{ background: '#0d1117' }}>
+          {content}
+          <span className="animate-pulse text-cyan-400">▌</span>
+        </pre>
+        {/* Bottom buttons */}
+        <div className="flex items-center gap-1.5 px-3 py-2 border-t border-gray-800 bg-gray-900">
+          <button onClick={onCopy} className="px-2.5 py-1 rounded text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">📋 نسخ</button>
+          {type === 'preview' && (
+            <button onClick={onOpenNew} className="px-2.5 py-1 rounded text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">🔗 نافذة جديدة</button>
+          )}
+          <button onClick={onDownload} className="px-2.5 py-1 rounded text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">💾 تحميل</button>
+          <div className="flex-1" />
+          <span className="text-[9px] text-gray-600">{fullContent.length} حرف</span>
+        </div>
       </div>
     </div>
   );
@@ -374,6 +465,13 @@ export default function MindFlowBrain() {
     risks?: string[];
     recommendations?: string[];
   } | null>(null);
+
+  // 🖥️ Live Output Panel
+  const [livePanelOpen, setLivePanelOpen] = useState(false);
+  const [livePanelContent, setLivePanelContent] = useState('');
+  const [livePanelTitle, setLivePanelTitle] = useState('');
+  const [livePanelType, setLivePanelType] = useState<'planning' | 'code' | 'preview' | 'report'>('planning');
+  const [livePanelFullContent, setLivePanelFullContent] = useState('');
 
   // 🖱️ Click feedback — shows a brief pulse when a node is clicked
   const [clickFeedback, setClickFeedback] = useState<{ x: number; y: number; label: string } | null>(null);
@@ -1117,52 +1215,195 @@ export default function MindFlowBrain() {
     }
   }, [ideaText, feedBrain, addTimeline, pushHistory]);
 
+  // ─── Helper: Update ancestor progress recursively ────────
+  const updateAncestorProgress = useCallback((startNodeId: string, allNodes: MindNode[]): MindNode[] => {
+    // Build a map of parentId -> children
+    const childrenMap = new Map<string, MindNode[]>();
+    allNodes.forEach(n => {
+      const pid = n.parentId;
+      if (pid) {
+        const children = childrenMap.get(pid) || [];
+        children.push(n);
+        childrenMap.set(pid, children);
+      }
+    });
+
+    // Calculate progress for a node based on its children
+    function calcProgress(nodeId: string): number {
+      const children = childrenMap.get(nodeId);
+      if (!children || children.length === 0) {
+        // Leaf node - use its own projectTasks
+        const node = allNodes.find(n => n.id === nodeId);
+        if (!node) return 0;
+        const tasks = node.projectTasks || [];
+        if (tasks.length === 0) return 0;
+        return Math.round(tasks.filter(t => t.status === 'done').length / tasks.length * 100);
+      }
+      // Average of children's progress
+      const childProgresses = children.map(c => calcProgress(c.id));
+      return Math.round(childProgresses.reduce((a, b) => a + b, 0) / childProgresses.length);
+    }
+
+    // Walk up from startNodeId and update each ancestor
+    const updatedNodes = [...allNodes];
+    let currentId: string | null = startNodeId;
+    while (currentId) {
+      const nodeIdx = updatedNodes.findIndex(n => n.id === currentId);
+      if (nodeIdx === -1) break;
+      const node = updatedNodes[nodeIdx];
+      const progress = calcProgress(currentId);
+      const allDone = progress === 100;
+      const isProjectNode = node.isProject;
+      updatedNodes[nodeIdx] = {
+        ...node,
+        projectProgress: progress,
+        ...(isProjectNode ? { projectPhase: allDone ? 'done' as const : 'execution' as const } : {}),
+      };
+      currentId = node.parentId;
+    }
+    return updatedNodes;
+  }, []);
+
   const executeTask = useCallback(async (taskId: string, taskLabel: string, parentNodeId: string) => {
     setTaskExecuting(taskId);
     try {
-      const projectNode = nodesRef.current.find(n => n.id === parentNodeId || (n.isProject));
+      // Find the project node for context
+      const projectNode = nodesRef.current.find(n => n.id === parentNodeId || n.isProject);
       const res = await fetch('/api/brain', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute-task', taskLabel, taskDescription: taskLabel, projectContext: projectNode?.label || '' }),
       });
-      await res.json();
+      const data = await res.json();
 
+      // Mark the task as done and store the result in summary
+      setNodes(prev => {
+        const updated = prev.map(n => {
+          if (n.id === parentNodeId) {
+            const updatedTasks = n.projectTasks.map(t => t.id === taskId ? { ...t, status: 'done' as const, summary: data.result || '' } : t);
+            const allDone = updatedTasks.every(t => t.status === 'done');
+            return { ...n, projectTasks: updatedTasks, projectProgress: allDone ? 100 : Math.round(updatedTasks.filter(t => t.status === 'done').length / updatedTasks.length * 100), projectPhase: allDone ? 'done' : 'execution' };
+          }
+          return n;
+        });
+        // Now propagate progress up the hierarchy
+        return updateAncestorProgress(parentNodeId, updated);
+      });
+
+      // Also update the task node's summary if it's a separate node
       setNodes(prev => prev.map(n => {
-        if (n.id === parentNodeId) {
-          const updatedTasks = n.projectTasks.map(t => t.id === taskId ? { ...t, status: 'done' as const } : t);
-          const allDone = updatedTasks.every(t => t.status === 'done');
-          return { ...n, projectTasks: updatedTasks, projectProgress: allDone ? 100 : Math.round(updatedTasks.filter(t => t.status === 'done').length / updatedTasks.length * 100), projectPhase: allDone ? 'done' : 'execution' };
+        // If there's a task node with this task's label that's a child of the parent
+        if (n.parentId === parentNodeId && n.label === taskLabel) {
+          return { ...n, summary: data.result || n.summary };
         }
         return n;
       }));
+
       setBrainStats(prev => ({ ...prev, tasksCompleted: prev.tasksCompleted + 1 }));
       feedBrain(parentNodeId);
       addTimeline('project', `تم تنفيذ: ${taskLabel}`);
-    } catch { /* */ }
-    setTaskExecuting(null);
-  }, [feedBrain, addTimeline]);
 
-  // ─── 🔧 Code Generator ─────────────────────────────────
+      // Show result in a small toast-like notification
+      if (data.result) {
+        setLivePanelTitle(`نتيجة: ${taskLabel}`);
+        setLivePanelType('planning');
+        setLivePanelContent('');
+        setLivePanelFullContent(data.result);
+        setLivePanelOpen(true);
+        // Animate typing the result
+        let idx = 0;
+        const text = data.result;
+        const interval = setInterval(() => {
+          idx += Math.min(3, text.length - idx);
+          setLivePanelContent(text.slice(0, idx));
+          if (idx >= text.length) clearInterval(interval);
+        }, 20);
+      }
+    } catch {
+      // Show error
+      setLivePanelTitle('خطأ في التنفيذ');
+      setLivePanelType('planning');
+      setLivePanelContent('❌ حدث خطأ أثناء تنفيذ المهمة. حاول مرة أخرى.');
+      setLivePanelFullContent('❌ حدث خطأ أثناء تنفيذ المهمة. حاول مرة أخرى.');
+      setLivePanelOpen(true);
+    }
+    setTaskExecuting(null);
+  }, [feedBrain, addTimeline, updateAncestorProgress]);
+
+  // ─── Execute All Tasks ──────────────────────────────────
+  const executeAllTasks = useCallback(async (parentNodeId: string) => {
+    const node = nodesRef.current.find(n => n.id === parentNodeId);
+    if (!node) return;
+
+    // Collect all pending tasks from this node and its children
+    const pendingTasks: { taskId: string; taskLabel: string; parentNodeId: string }[] = [];
+
+    // Tasks on this node itself
+    (node.projectTasks || []).forEach(t => {
+      if (t.status !== 'done') pendingTasks.push({ taskId: t.id, taskLabel: t.label, parentNodeId: node.id });
+    });
+
+    // Tasks on child nodes (phase -> task nodes)
+    const children = nodesRef.current.filter(n => n.parentId === parentNodeId);
+    children.forEach(cn => {
+      (cn.projectTasks || []).forEach(t => {
+        if (t.status !== 'done') pendingTasks.push({ taskId: t.id, taskLabel: t.label, parentNodeId: cn.id });
+      });
+    });
+
+    if (pendingTasks.length === 0) return;
+
+    // Open live panel for progress
+    setLivePanelOpen(true);
+    setLivePanelTitle(`تنفيذ الكل: ${node.label}`);
+    setLivePanelType('planning');
+    setLivePanelContent(`⏳ جاري تنفيذ ${pendingTasks.length} مهمة...\n\n`);
+    setLivePanelFullContent('');
+
+    let resultText = `تنفيذ ${pendingTasks.length} مهمة:\n\n`;
+    for (const task of pendingTasks) {
+      resultText += `▶️ تنفيذ: ${task.taskLabel}\n`;
+      setLivePanelContent(resultText);
+      await executeTask(task.taskId, task.taskLabel, task.parentNodeId);
+      resultText += `  ✅ تم\n\n`;
+      setLivePanelContent(resultText);
+    }
+    resultText += `\n🎉 تم تنفيذ جميع المهام!`;
+    setLivePanelContent(resultText);
+    setLivePanelFullContent(resultText);
+  }, [executeTask]);
+
+  // ─── 🔧 Code Generator (with Live Panel) ────────────────
   const generateProjectCode = useCallback(async (projectNode: MindNode) => {
     setCodeLoading(true);
-    setCodeDialogOpen(true);
     setCodeFiles([]);
     setSelectedCodeFile(null);
-    try {
-      const idea = projectNode.summary || projectNode.label;
-      const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
-      const phases = phaseNodes.map(pn => {
-        const taskNodes = nodesRef.current.filter(n => n.parentId === pn.id);
-        return {
-          name: pn.label,
-          description: pn.summary || '',
-          tasks: taskNodes.map(tn => ({ label: tn.label, description: tn.summary || '' })),
-        };
-      });
-      const flatTasks = projectNode.projectTasks || [];
 
+    // Open live panel
+    setLivePanelOpen(true);
+    setLivePanelTitle(projectNode.label || 'مشروع');
+    setLivePanelType('code');
+    setLivePanelContent('');
+    setLivePanelFullContent('');
+
+    const idea = projectNode.summary || projectNode.label;
+    const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
+    const phases = phaseNodes.map(pn => {
+      const taskNodes = nodesRef.current.filter(n => n.parentId === pn.id);
+      return {
+        name: pn.label,
+        description: pn.summary || '',
+        tasks: taskNodes.map(tn => ({ label: tn.label, description: tn.summary || '' })),
+      };
+    });
+    const flatTasks = projectNode.projectTasks || [];
+
+    // Show initial message
+    setLivePanelContent('⏳ جاري توليد هيكل المشروع...\n\n');
+    setLivePanelFullContent('⏳ جاري توليد هيكل المشروع...\n\n');
+
+    try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
       const res = await fetch('/api/brain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1174,19 +1415,47 @@ export default function MindFlowBrain() {
       if (data.files?.length) {
         setCodeFiles(data.files);
         setSelectedCodeFile(data.files[0].path);
+        // Build full content
+        const fullText = data.files.map((f: { path: string; content: string }) =>
+          `\n${'═'.repeat(50)}\n📄 ${f.path}\n${'═'.repeat(50)}\n\n${f.content}`
+        ).join('\n');
+        setLivePanelFullContent(fullText);
+        // Animate typing each file
+        let currentIdx = 0;
+        let displayed = '';
+        const typingInterval = setInterval(() => {
+          const chunkSize = Math.min(8, fullText.length - currentIdx);
+          if (chunkSize <= 0) { clearInterval(typingInterval); return; }
+          currentIdx += chunkSize;
+          displayed = fullText.slice(0, currentIdx);
+          setLivePanelContent(displayed);
+        }, 15);
+      } else {
+        setLivePanelContent('❌ لم يتم توليد كود. حاول مرة أخرى.');
+        setLivePanelFullContent('❌ لم يتم توليد كود. حاول مرة أخرى.');
       }
     } catch (err) {
       console.error('generateProjectCode error:', err);
+      const errMsg = '❌ خطأ في توليد الكود. حاول مرة أخرى.';
+      setLivePanelContent(errMsg);
+      setLivePanelFullContent(errMsg);
       setCodeFiles([]);
     }
     setCodeLoading(false);
   }, []);
 
-  // ─── 🌐 Live Preview ───────────────────────────────────
+  // ─── 🌐 Live Preview (with Live Panel) ────────────────
   const generateProjectPreview = useCallback(async (projectNode: MindNode) => {
     setPreviewLoading(true);
-    setPreviewOpen(true);
     setPreviewHtml('');
+
+    // Open live panel
+    setLivePanelOpen(true);
+    setLivePanelTitle(projectNode.label || 'مشروع');
+    setLivePanelType('preview');
+    setLivePanelContent('⏳ جاري بناء المعاينة...\n\n');
+    setLivePanelFullContent('');
+
     try {
       const idea = projectNode.summary || projectNode.label;
       const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
@@ -1201,7 +1470,7 @@ export default function MindFlowBrain() {
       const flatTasks = projectNode.projectTasks || [];
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
       const res = await fetch('/api/brain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1212,19 +1481,41 @@ export default function MindFlowBrain() {
       const data = await res.json();
       if (data.html) {
         setPreviewHtml(data.html);
+        // Show HTML source in live panel with typing animation
+        const fullText = data.html;
+        setLivePanelFullContent(fullText);
+        let currentIdx = 0;
+        const typingInterval = setInterval(() => {
+          const chunkSize = Math.min(12, fullText.length - currentIdx);
+          if (chunkSize <= 0) { clearInterval(typingInterval); return; }
+          currentIdx += chunkSize;
+          setLivePanelContent(fullText.slice(0, currentIdx));
+        }, 10);
+      } else {
+        setLivePanelContent('❌ لم يتم توليد معاينة.');
+        setLivePanelFullContent('');
       }
     } catch (err) {
       console.error('generateProjectPreview error:', err);
+      setLivePanelContent('❌ خطأ في توليد المعاينة. حاول مرة أخرى.');
+      setLivePanelFullContent('');
       setPreviewHtml('');
     }
     setPreviewLoading(false);
   }, []);
 
-  // ─── 📄 Project Report ─────────────────────────────────
+  // ─── 📄 Project Report (with Live Panel) ──────────────
   const generateProjectReport = useCallback(async (projectNode: MindNode) => {
     setReportLoading(true);
-    setReportDialogOpen(true);
     setReportData(null);
+
+    // Open live panel
+    setLivePanelOpen(true);
+    setLivePanelTitle(projectNode.label || 'مشروع');
+    setLivePanelType('report');
+    setLivePanelContent('⏳ جاري توليد التقرير...\n\n');
+    setLivePanelFullContent('');
+
     try {
       const idea = projectNode.summary || projectNode.label;
       const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
@@ -1239,7 +1530,7 @@ export default function MindFlowBrain() {
       const flatTasks = projectNode.projectTasks || [];
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120s
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
       const res = await fetch('/api/brain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1250,9 +1541,34 @@ export default function MindFlowBrain() {
       const data = await res.json();
       if (data.report) {
         setReportData(data.report);
+        // Build formatted report text
+        const r = data.report;
+        const parts: string[] = [];
+        if (r.executiveSummary) parts.push(`📋 الملخص التنفيذي:\n${r.executiveSummary}`);
+        if (r.requirements?.length) parts.push(`\n✅ المتطلبات:\n${r.requirements.map((x: string) => `  • ${x}`).join('\n')}`);
+        if (r.techStack?.length) parts.push(`\n🛠️ التقنيات:\n${r.techStack.map((x: string) => `  • ${x}`).join('\n')}`);
+        if (r.architecture) parts.push(`\n🏗️ البنية التقنية:\n${r.architecture}`);
+        if (r.timeline) parts.push(`\n📅 الجدول الزمني:\n${r.timeline}`);
+        if (r.risks?.length) parts.push(`\n⚠️ المخاطر:\n${r.risks.map((x: string) => `  • ${x}`).join('\n')}`);
+        if (r.recommendations?.length) parts.push(`\n💡 التوصيات:\n${r.recommendations.map((x: string) => `  • ${x}`).join('\n')}`);
+        const fullText = parts.join('\n\n');
+        setLivePanelFullContent(fullText);
+        // Animate typing
+        let currentIdx = 0;
+        const typingInterval = setInterval(() => {
+          const chunkSize = Math.min(4, fullText.length - currentIdx);
+          if (chunkSize <= 0) { clearInterval(typingInterval); return; }
+          currentIdx += chunkSize;
+          setLivePanelContent(fullText.slice(0, currentIdx));
+        }, 18);
+      } else {
+        setLivePanelContent('❌ لم يتم توليد تقرير.');
+        setLivePanelFullContent('');
       }
     } catch (err) {
       console.error('generateProjectReport error:', err);
+      setLivePanelContent('❌ خطأ في توليد التقرير. حاول مرة أخرى.');
+      setLivePanelFullContent('');
       setReportData(null);
     }
     setReportLoading(false);
@@ -1812,13 +2128,14 @@ export default function MindFlowBrain() {
     }
     setSelectedNode({...hitNode});
     setSelectedNodeIds(new Set([hitNode.id]));
-    // Open project panel for project nodes
-    const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
-    if (isProjectNode) {
-      if (!hitNode.isProject) {
+    // Open project panel for project nodes, phase nodes, or nodes with children/tasks
+    const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || hitNode.tag === 'مرحلة' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
+    const hasChildrenNodes = nodesRef.current.some(n => n.parentId === hitNode.id);
+    if (isProjectNode || hasChildrenNodes) {
+      if (!hitNode.isProject && hitNode.tag !== 'مرحلة') {
         setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
       }
-      setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
+      setProjectPanelNode({...hitNode, isProject: hitNode.isProject || hitNode.tag === 'مشروع', tag: hitNode.tag || 'مشروع'});
     } else {
       setProjectPanelNode(null);
     }
@@ -2292,7 +2609,7 @@ export default function MindFlowBrain() {
       )}
 
       {/* ─── Project Panel ────────────────────────────── */}
-      {projectPanelNode && (projectPanelNode.isProject || projectPanelNode.tag === 'مشروع' || (projectPanelNode.projectTasks && projectPanelNode.projectTasks.length > 0)) && (
+      {projectPanelNode && (projectPanelNode.isProject || projectPanelNode.tag === 'مشروع' || projectPanelNode.tag === 'مرحلة' || (projectPanelNode.projectTasks && projectPanelNode.projectTasks.length > 0) || nodes.some(n => n.parentId === projectPanelNode.id)) && (
         <ProjectPanel
           projectNode={projectPanelNode}
           nodes={nodes}
@@ -2308,6 +2625,7 @@ export default function MindFlowBrain() {
           onGenerateCode={generateProjectCode}
           onGeneratePreview={generateProjectPreview}
           onGenerateReport={generateProjectReport}
+          onExecuteAll={executeAllTasks}
         />
       )}
 
@@ -2636,6 +2954,32 @@ export default function MindFlowBrain() {
           </div>
         </div>
       )}
+
+      {/* ─── 🖥️ Live Output Panel ─────────────────────────── */}
+      <LivePanel
+        open={livePanelOpen}
+        title={livePanelTitle}
+        type={livePanelType}
+        content={livePanelContent}
+        fullContent={livePanelFullContent}
+        onClose={() => setLivePanelOpen(false)}
+        onCopy={() => { navigator.clipboard.writeText(livePanelFullContent); }}
+        onOpenNew={() => {
+          if (previewHtml) {
+            const win = window.open('', '_blank');
+            if (win) { win.document.write(previewHtml); win.document.close(); }
+          }
+        }}
+        onDownload={() => {
+          const ext = livePanelType === 'preview' ? 'html' : livePanelType === 'code' ? 'txt' : 'txt';
+          const blob = new Blob([livePanelFullContent], { type: 'text/plain;charset=utf-8' });
+          const link = document.createElement('a');
+          link.download = `mindflow-${livePanelType}-${Date.now()}.${ext}`;
+          link.href = URL.createObjectURL(blob);
+          link.click();
+          URL.revokeObjectURL(link.href);
+        }}
+      />
     </div>
   );
 }

@@ -536,51 +536,50 @@ export async function POST(req: NextRequest) {
         const { idea, phases, tasks } = body;
         console.log('[Brain API] generate-report for:', idea?.substring(0, 50));
 
-        const phasesDesc = phases?.map((p: { name: string; description: string; tasks: { label: string; description: string }[] }) =>
-          `مرحلة: ${p.name} - ${p.description}\nالمهام: ${p.tasks?.map((t: { label: string; description: string }) => `${t.label} (${t.description})`).join(', ')}`
-        ).join('\n');
+        // Build report directly from project data with AI enhancement (fallback if AI fails)
+        const phaseItems = Array.isArray(phases) ? phases : [];
+        const allTaskLabels = phaseItems.flatMap((p: { tasks: { label: string; description: string }[] }) =>
+          (p.tasks || []).map((t: { label: string; description: string }) => t.label)
+        );
 
-        const systemPrompt = `أنت مستشار مشاريع محترف. قم بتوليد تقرير مشروع شامل بناءً على الفكرة والمراحل والمهام. أجب بصيغة JSON فقط بدون أي نص آخر. الصيغة:
-{"report":{"executiveSummary":"ملخص تنفيذي شامل (3-5 جمل)","requirements":["متطلب 1","متطلب 2","متطلب 3"],"techStack":["تقنية 1","تقنية 2","تقنية 3"],"architecture":"وصف البنية التقنية للمشروع","timeline":"الجدول الزمني المقترح","risks":["خطر 1","خطر 2","خطر 3"],"recommendations":["توصية 1","توصية 2","توصية 3"]}}
-كل شيء بالعربية. كن مفصلاً ومهنياً. لا تكتب أي شيء قبل أو بعد JSON.`;
+        const report = {
+          executiveSummary: 'مشروع ' + (idea || 'مشروع') + ' هو مشروع مبتكر يهدف إلى تقديم حلول ذكية ومتطورة تلبي احتياجات المستخدمين. يمر المشروع بعدة مراحل أساسية تبدأ من التخطيط والتحليل مروراً بالتصميم والتطوير وصولاً إلى الاختبار والإطلاق. يتميز المشروع ببنيته المرنة وقابليته للتوسع مما يضمن استدامته على المدى الطويل.',
+          requirements: allTaskLabels.length > 0
+            ? allTaskLabels.slice(0, 6).map((t: string) => t)
+            : ['واجهة مستخدم سهلة الاستخدام', 'نظام إدارة متكامل', 'دعم اللغة العربية', 'تصميم متجاوب'],
+          techStack: ['Next.js 14', 'React 18', 'TypeScript', 'Tailwind CSS', 'Prisma ORM', 'PostgreSQL'],
+          architecture: 'بنية ثلاثية الطبقات: واجهة أمامية (Next.js + React) تعمل على المتصفح، خادم API (Next.js API Routes) يعالج المنطق، وقاعدة بيانات (PostgreSQL) لتخزين البيانات. يتم التواصل بين الطبقات عبر REST API.',
+          timeline: phaseItems.length > 0
+            ? phaseItems.map((p: { name: string }, i: number) => 'المرحلة ' + (i + 1) + ': ' + p.name + ' (' + (2 + i) + ' أسابيع)').join(' → ')
+            : 'المرحلة 1: التخطيط (2 أسابيع) → المرحلة 2: التطوير (4 أسابيع) → المرحلة 3: الاختبار (2 أسابيع) → المرحلة 4: الإطلاق (1 أسبوع)',
+          risks: ['تأخر في التطوير بسبب تعقيدات تقنية', 'تغيير المتطلبات أثناء التنفيذ', 'تحديات الأداء مع زيادة عدد المستخدمين'],
+          recommendations: ['البدء بنسخة أولية بسيطة (MVP) واختبارها مع المستخدمين', 'اتباع منهجية Agile للتطوير التكراري', 'توثيق الكود وال API بشكل مستمر', 'إعداد بيئة CI/CD للنشر التلقائي'],
+        };
 
-        const text = await callAI([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `فكرة المشروع: ${idea}\n\nالمراحل والمهام:\n${phasesDesc || 'غير محدد'}` },
-        ], 0.3);
-
-        let report = null;
+        // Try to enhance with AI (optional - if it fails, use the basic report)
         try {
-          // Try direct parse first
-          const parsed = JSON.parse(text);
-          report = parsed.report || parsed;
-        } catch {
-          try {
-            const m = text.match(/\{[\s\S]*\}/);
-            if (m) {
-              try {
-                const parsed = JSON.parse(m[0]);
-                report = parsed.report || parsed;
-              } catch {
-                const fixed = m[0].replace(/,\s*([}\]])/g, '$1').replace(/'/g, '"');
-                const parsed = JSON.parse(fixed);
-                report = parsed.report || parsed;
-              }
-            }
-          } catch { /* empty */ }
-        }
+          const systemPrompt = 'أنت مستشار مشاريع. ولّد تقرير JSON فقط. الصيغة:\n{"report":{"executiveSummary":"ملخص","requirements":["r1"],"techStack":["t1"],"architecture":"وصف","timeline":"جدول","risks":["خ1"],"recommendations":["ت1"]}}\nكل شيء بالعربية. كن مختصراً. لا تكتب أي شيء قبل أو بعد JSON.';
 
-        // Fallback report
-        if (!report) {
-          report = {
-            executiveSummary: `مشروع ${idea} هو مشروع مبتكر يهدف إلى تقديم حلول ذكية ومتطورة.`,
-            requirements: ['واجهة مستخدم سهلة الاستخدام', 'نظام إدارة متكامل', 'دعم اللغة العربية', 'تصميم متجاوب'],
-            techStack: ['Next.js', 'React', 'Tailwind CSS', 'TypeScript'],
-            architecture: 'بنية ثلاثية الطبقات: واجهة أمامية (Frontend)، خادم API (Backend)، قاعدة بيانات (Database)',
-            timeline: '3-6 أشهر مقسمة على مراحل التخطيط والتطوير والاختبار والإطلاق',
-            risks: ['تأخر في التطوير', 'تغيير المتطلبات', 'تحديات الأداء'],
-            recommendations: ['البدء بنسخة أولية بسيطة', 'اختبار مستمر مع المستخدمين', 'توثيق الكود بشكل جيد'],
-          };
+          const text = await callAI([
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: 'المشروع: ' + (idea || 'مشروع') },
+          ], 0.3, 30000); // 30s timeout
+
+          const m = text.match(/\{[\s\S]*\}/);
+          if (m) {
+            try {
+              const parsed = JSON.parse(m[0]);
+              if (parsed.report) return NextResponse.json({ report: parsed.report });
+            } catch {
+              const fixed = m[0].replace(/,\s*([}\]])/g, '$1').replace(/'/g, '"');
+              try {
+                const parsed = JSON.parse(fixed);
+                if (parsed.report) return NextResponse.json({ report: parsed.report });
+              } catch { /* use fallback */ }
+            }
+          }
+        } catch (err) {
+          console.error('[Brain API] generate-report AI failed, using fallback:', err instanceof Error ? err.message : String(err));
         }
 
         return NextResponse.json({ report });
