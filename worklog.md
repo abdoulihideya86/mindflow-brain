@@ -1,33 +1,19 @@
 ---
-Task ID: 1
+Task ID: 2
 Agent: Main Agent
-Task: Build MindFlow Brain - Interactive Knowledge Graph with Learning Brain
+Task: Implement 5 new features for MindFlow Brain (1,2,7,8,9)
 
 Work Log:
-- Analyzed original index.html MindFlow project (vanilla JS knowledge graph)
-- Designed and implemented complete MindFlow Brain application as Next.js web app
-- Created type system (src/lib/mindflow/types.ts)
-- Created knowledge base with 6 topics and cross-linking rules (src/lib/mindflow/knowledge.ts)
-- Built comprehensive main page component with:
-  - Central Brain node (العقل) that pulses and grows
-  - Canvas-based graph rendering with animated edges and feed particles
-  - Topic expansion with auto-feeding to the brain
-  - Sub-node expansion (click to expand/collapse)
-  - Custom node creation dialog (add name, tag, summary)
-  - Cross-linking system (auto-links nodes with matching tags)
-  - Manual connect mode (click two nodes to link them)
-  - Feed brain mechanic (particles flow from node to brain)
-  - Brain level system (بذرة → برعم → شتلة → شجرة → غابة → نظام بيئي → كوكب → مجرة → كون)
-  - Statistics panel (total nodes, connections, feeds, growth rate, knowledge progress)
-  - Node selection panel with actions (feed, expand, connect, delete)
-  - LocalStorage persistence for brain stats and custom nodes
-  - Responsive canvas with pan and zoom support
-- Updated layout.tsx with Arabic RTL support and custom fonts
-- Fixed lint errors (function declaration order, setState in effects)
+- Updated types.ts with new fields: maturity, dormant, alliedWith, visitCount, lastFedAt, aiSummary, aiQuestions, view modes, filter state, timeline entries
+- Created sounds.ts with 8 sound effects using Web Audio API (feed, connect, levelUp, aiInsight, mature, alliance, searchFound, mute toggle)
+- Created /api/brain/route.ts - AI backend using z-ai-web-dev-sdk with 4 actions: summarize, suggest-links, generate-nodes, ask
+- Completely rewrote page.tsx with all 5 features integrated
+- Fixed lint errors - 0 errors, 1 warning (custom font)
 - Verified successful compilation
 
 Stage Summary:
-- Complete MindFlow Brain web application built and running
-- Key features: Brain node, feed mechanic, cross-linking, custom nodes, persistence, levels
-- All 7 todo items completed
-- App accessible via preview link
+- Feature 1 (AI): Brain can summarize network, suggest hidden links, generate child nodes, answer questions via AI
+- Feature 2 (Search): Real-time search with dropdown results, highlighted/dimmed nodes, click to navigate
+- Feature 7 (Sounds): 8 distinct sound effects with mute toggle, all using Web Audio API
+- Feature 8 (Views): Normal/Heatmap/Filtered modes, filter panel with knowledge level/tags/maturity/dormant, timeline in stats
+- Feature 9 (Evolution): 4 maturity levels (seed/sprout/tree/ancient), dormant nodes after 1min idle, alliance system, wake mechanic
