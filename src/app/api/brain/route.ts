@@ -1,17 +1,59 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ZAI from 'z-ai-web-dev-sdk';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
+
+// ─── Robust config loader ───────────────────────────────
+function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; token?: string; userId?: string } | null {
+  const configPaths = [
+    join(process.cwd(), '.z-ai-config'),
+    join(homedir(), '.z-ai-config'),
+    '/etc/.z-ai-config',
+  ];
+  for (const filePath of configPaths) {
+    try {
+      const configStr = readFileSync(filePath, 'utf-8');
+      const config = JSON.parse(configStr);
+      if (config.baseUrl && config.apiKey) {
+        console.log(`[Brain API] Loaded config from: ${filePath}`);
+        return config;
+      }
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        console.error(`[Brain API] Error reading config at ${filePath}:`, err);
+      }
+    }
+  }
+  return null;
+}
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action } = body;
 
-    let zai;
+    // Initialize ZAI SDK with manual config loading (more robust than ZAI.create())
+    let zai: InstanceType<typeof ZAI>;
     try {
-      zai = await ZAI.create();
+      const config = loadZAIConfig();
+      if (!config) {
+        console.error('[Brain API] No valid .z-ai-config found in any location');
+        return NextResponse.json({
+          error: 'AI service unavailable',
+          summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً — لم يتم العثور على ملف الإعداد'
+        }, { status: 503 });
+      }
+      // Use the ZAI constructor directly with our loaded config
+      zai = new ZAI(config);
+      console.log('[Brain API] ZAI SDK initialized successfully');
     } catch (sdkError) {
-      console.error('ZAI SDK init error:', sdkError);
-      return NextResponse.json({ error: 'AI service unavailable', summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً' }, { status: 503 });
+      console.error('[Brain API] ZAI SDK init error:', sdkError);
+      return NextResponse.json({
+        error: 'AI service unavailable',
+        summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً'
+      }, { status: 503 });
     }
 
     switch (action) {
@@ -94,9 +136,11 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ answer: completion.choices[0]?.message?.content || '' });
       }
 
-      // 💡 NEW: Analyze an idea and create a project plan
+      // 💡 Analyze an idea and create a project plan
       case 'analyze-idea': {
         const { idea } = body;
+        console.log('[Brain API] analyze-idea called with idea:', idea?.substring(0, 50));
+
         const completion = await zai.chat.completions.create({
           messages: [
             {
@@ -128,12 +172,15 @@ export async function POST(req: NextRequest) {
         try {
           const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/);
           if (m) analysis = JSON.parse(m[0]);
-        } catch {}
+        } catch (parseErr) {
+          console.error('[Brain API] Failed to parse analyze-idea response:', parseErr);
+        }
 
+        console.log('[Brain API] analyze-idea result:', analysis ? 'success' : 'no analysis generated');
         return NextResponse.json({ analysis });
       }
 
-      // 💡 NEW: Execute a project task
+      // 💡 Execute a project task
       case 'execute-task': {
         const { taskLabel, taskDescription, projectContext } = body;
         const completion = await zai.chat.completions.create({
@@ -150,7 +197,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ result: completion.choices[0]?.message?.content || '' });
       }
 
-      // 🎓 NEW: Generate quiz questions
+      // 🎓 Generate quiz questions
       case 'generate-quiz': {
         const { nodes } = body;
         const nodeDescriptions = nodes
@@ -185,7 +232,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ quiz });
       }
 
-      // 🧠 NEW: Auto-learn - analyze gaps and suggest new knowledge
+      // 🧠 Auto-learn - analyze gaps and suggest new knowledge
       case 'auto-learn': {
         const { nodes, brainKnowledge } = body;
         const nodeDescriptions = nodes
@@ -223,7 +270,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     }
   } catch (error) {
-    console.error('Brain API error:', error);
-    return NextResponse.json({ error: 'Failed' }, { status: 500 });
+    console.error('[Brain API] Unhandled error:', error);
+    return NextResponse.json({ error: 'Failed', summary: 'حدث خطأ غير متوقع' }, { status: 500 });
   }
 }
