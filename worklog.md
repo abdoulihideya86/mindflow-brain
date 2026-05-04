@@ -31,3 +31,27 @@ Stage Summary:
 - Total codebase: ~2836 lines across 5 key files
 - 14 achievements, 8 AI actions, quiz system, project system, auto-learn
 - Full keyboard shortcuts, undo/redo, multi-select, minimap
+
+---
+Task ID: 4
+Agent: Main Agent
+Task: Fix project nodes not clickable after page reload
+
+Work Log:
+- Identified root cause: `saveState()` only saved `{label, tag, summary}` for custom nodes, losing all project data (`isProject`, `projectPhase`, `projectProgress`, `projectTasks`), edges, and sub-nodes
+- After reload, `makeNode()` defaulted `isProject: false`, so clicking project nodes opened the wrong panel
+- Added `FullPersistedState` interface with version tracking that saves ALL nodes and edges
+- Added `saveFullState()` function that serializes complete node/edge data (strips transient fields like feedParticles)
+- Added `loadFullState()` function with version checking
+- Updated `getInitialState()` to try full state first (with viewport centering), fallback to legacy format
+- Updated save effect to write both full state and legacy fallback
+- Added fallback detection for project nodes by checking `tag === 'مشروع'` in addition to `isProject`
+- Auto-fix: when clicking a node with `tag === 'مشروع'` but `isProject === false`, the flag is auto-corrected
+- Enhanced project panel: uses live state (not stale snapshot), shows child nodes navigation, Arabic phase labels, feed/delete actions
+- Build verified: 0 errors, dev server running
+
+Stage Summary:
+- Full state persistence now saves all nodes + edges with version tracking
+- Project nodes are fully restored on reload with all their data
+- Project panel shows live data, child phase navigation, and Arabic labels
+- Backward compatible with legacy localStorage format
