@@ -288,15 +288,29 @@ export default function MindFlowBrain() {
       // Reposition brain to center of current viewport
       const offsetX = brain ? cx - brain.x : 0;
       const offsetY = brain ? cy - brain.y : 0;
-      const restoredNodes = fullPersisted.nodes.map(n => ({
-        ...n,
-        x: n.x + offsetX,
-        y: n.y + offsetY,
-        feedParticles: [],
-        enterAnim: 1,
-        selected: false,
-        dormant: n.dormant,
-      }));
+      const restoredNodes = fullPersisted.nodes.map(n => {
+        // Fill in missing properties from older saves to prevent runtime errors
+        const defaults: Partial<MindNode> = {
+          isBrain: false, isCustom: false, expanded: false, hasChildren: false,
+          connections: [], knowledgeLevel: 0, color: '#00ffe0', pulsePhase: Math.random() * Math.PI * 2,
+          maturity: 'seed', dormant: false, lastFedAt: Date.now(), visitCount: 0,
+          alliedWith: [], aiSummary: '', aiQuestions: [], aiSuggestedLinks: [],
+          feedParticles: [],
+          isProject: false, projectPhase: 'idea', projectProgress: 0, projectTasks: [],
+          quizQuestion: undefined, quizOptions: undefined, quizCorrectIndex: undefined,
+          enterAnim: 1, selected: false,
+          childrenData: undefined,
+        };
+        return {
+          ...defaults,
+          ...n,
+          x: n.x + offsetX,
+          y: n.y + offsetY,
+          feedParticles: [],
+          enterAnim: 1,
+          selected: false,
+        };
+      });
       const restoredEdges = fullPersisted.edges.map(e => ({ ...e }));
       const restoredStats = { ...defaultStats(), ...fullPersisted.brainStats };
       return {
@@ -1606,39 +1620,52 @@ export default function MindFlowBrain() {
 
   // ─── Node click handler (shared logic) ────────────────────
   const handleNodeClick = useCallback((hitNode: MindNode) => {
-    console.log('[MindFlow] handleNodeClick:', hitNode.label, '| isBrain:', hitNode.isBrain, '| isProject:', hitNode.isProject, '| tag:', hitNode.tag);
-    // Visual feedback
-    setClickFeedback({ x: hitNode.x, y: hitNode.y, label: hitNode.label });
-    setTimeout(() => setClickFeedback(null), 800);
+    try {
+      // Visual feedback
+      setClickFeedback({ x: hitNode.x, y: hitNode.y, label: hitNode.label });
+      setTimeout(() => setClickFeedback(null), 800);
 
-    if (connectMode && connectFrom) {
-      if (hitNode.id !== connectFrom && !hitNode.isBrain) {
-        connectNodes(connectFrom, hitNode.id);
-        setConnectMode(false); setConnectFrom(null);
+      if (connectMode && connectFrom) {
+        if (hitNode.id !== connectFrom && !hitNode.isBrain) {
+          connectNodes(connectFrom, hitNode.id);
+          setConnectMode(false); setConnectFrom(null);
+        }
+        return;
       }
-      return;
-    }
-    setSelectedNode({...hitNode});
-    setSelectedNodeIds(new Set([hitNode.id]));
-    // Open project panel for project nodes
-    const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
-    if (isProjectNode) {
-      if (!hitNode.isProject) {
-        setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
+      setSelectedNode({...hitNode});
+      setSelectedNodeIds(new Set([hitNode.id]));
+      // Open project panel for project nodes
+      const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
+      if (isProjectNode) {
+        if (!hitNode.isProject) {
+          setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
+        }
+        setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
+      } else {
+        setProjectPanelNode(null);
       }
-      setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
-    } else {
-      setProjectPanelNode(null);
+      sounds.searchFound();
+    } catch (err) {
+      console.error('[MindFlow] Error in handleNodeClick:', err);
     }
-    sounds.searchFound();
   }, [connectMode, connectFrom, connectNodes]);
 
   // ─── Mouse/Touch Handlers ──────────────────────────────
+  // Use refs for handler functions so the useEffect doesn't re-register
+  // event listeners on every state change (which was causing clicks to be lost)
+  const handleNodeClickRef = useRef(handleNodeClick);
+  const expandNodeRef = useRef(expandNode);
+  const feedBrainRef = useRef(feedBrain);
+
+  useEffect(() => { handleNodeClickRef.current = handleNodeClick; }, [handleNodeClick]);
+  useEffect(() => { expandNodeRef.current = expandNode; }, [expandNode]);
+  useEffect(() => { feedBrainRef.current = feedBrain; }, [feedBrain]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Track if a node was tapped (not dragged)
+    // Track if a node was tapped (not dragged) — stored in refs so they survive across re-renders
     let tapNodeId: string | null = null;
     let isDragging = false;
 
@@ -1711,8 +1738,11 @@ export default function MindFlowBrain() {
       if (tapNodeId && !isDragging) {
         const hitNode = nodesRef.current.find(n => n.id === tapNodeId);
         if (hitNode) {
-          console.log('[MindFlow] TAP on node:', hitNode.label);
-          handleNodeClick(hitNode);
+          try {
+            handleNodeClickRef.current(hitNode);
+          } catch (err) {
+            console.error('[MindFlow] handleNodeClick error:', err);
+          }
         }
       } else if (!tapNodeId && !isDragging && panRef.current.active) {
         // Tapped on empty space — deselect
@@ -1749,14 +1779,17 @@ export default function MindFlowBrain() {
       const hit = findNodeAt(sx, sy);
       if (hit) {
         if (hit.hasChildren || hit.childrenData?.length) {
-          expandNode(hit.id);
+          expandNodeRef.current(hit.id);
         } else {
-          feedBrain(hit.id);
+          feedBrainRef.current(hit.id);
         }
       } else {
         setAddDialogOpen(true);
       }
     }
+
+    // Touch prevention handlers (stored so we can remove them on cleanup)
+    const preventTouch = (e: TouchEvent) => { e.preventDefault(); };
 
     canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
     canvas.addEventListener('pointermove', onPointerMove, { passive: false });
@@ -1764,9 +1797,8 @@ export default function MindFlowBrain() {
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('dblclick', onDblClick);
-    // Prevent default touch behaviors (scrolling, zooming) that block interaction
-    canvas.addEventListener('touchstart', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
-    canvas.addEventListener('touchmove', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
+    canvas.addEventListener('touchstart', preventTouch, { passive: false });
+    canvas.addEventListener('touchmove', preventTouch, { passive: false });
     return () => {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
@@ -1774,8 +1806,10 @@ export default function MindFlowBrain() {
       canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('dblclick', onDblClick);
+      canvas.removeEventListener('touchstart', preventTouch);
+      canvas.removeEventListener('touchmove', preventTouch);
     };
-  }, [findNodeAt, connectMode, connectFrom, connectNodes, expandNode, feedBrain, handleNodeClick]);
+  }, [findNodeAt]); // ONLY findNodeAt as dependency — handlers accessed via refs
 
   // ─── Minimap Click ─────────────────────────────────────
   const onMinimapClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
