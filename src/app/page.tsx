@@ -401,6 +401,9 @@ export default function MindFlowBrain() {
   const [unlockedAchievements, setUnlockedAchievements] = useState<string[]>(initialData.unlockedAch);
   const [achievementToast, setAchievementToast] = useState<Achievement | null>(null);
 
+  // 🖱️ Click feedback — shows a brief pulse when a node is clicked
+  const [clickFeedback, setClickFeedback] = useState<{ x: number; y: number; label: string } | null>(null);
+
   // Multi-select
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
 
@@ -1601,25 +1604,62 @@ export default function MindFlowBrain() {
     return () => cancelAnimationFrame(animRef.current);
   }, [selectedNode, brainStats.totalKnowledge, connectMode, connectFrom, highlightedNodes, searchActive, viewMode, filterState, getFilteredNodeIds, theme, selectedNodeIds, isNodeInViewport]);
 
+  // ─── Node click handler (shared logic) ────────────────────
+  const handleNodeClick = useCallback((hitNode: MindNode) => {
+    console.log('[MindFlow] handleNodeClick:', hitNode.label, '| isBrain:', hitNode.isBrain, '| isProject:', hitNode.isProject, '| tag:', hitNode.tag);
+    // Visual feedback
+    setClickFeedback({ x: hitNode.x, y: hitNode.y, label: hitNode.label });
+    setTimeout(() => setClickFeedback(null), 800);
+
+    if (connectMode && connectFrom) {
+      if (hitNode.id !== connectFrom && !hitNode.isBrain) {
+        connectNodes(connectFrom, hitNode.id);
+        setConnectMode(false); setConnectFrom(null);
+      }
+      return;
+    }
+    setSelectedNode({...hitNode});
+    setSelectedNodeIds(new Set([hitNode.id]));
+    // Open project panel for project nodes
+    const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
+    if (isProjectNode) {
+      if (!hitNode.isProject) {
+        setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
+      }
+      setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
+    } else {
+      setProjectPanelNode(null);
+    }
+    sounds.searchFound();
+  }, [connectMode, connectFrom, connectNodes]);
+
   // ─── Mouse/Touch Handlers ──────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    // Track down position for click vs drag detection
+    let downPos = { x: 0, y: 0 };
+    let downNodeId: string | null = null;
+    let isDragging = false;
+
     function onPointerDown(e: PointerEvent) {
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
+      downPos = { x: sx, y: sy };
+      isDragging = false;
+
       const hit = findNodeAt(sx, sy);
       if (hit) {
+        downNodeId = hit.id;
         dragRef.current = { nodeId: hit.id, startX: sx, startY: sy, nodeStartX: hit.x, nodeStartY: hit.y, moved: false };
       } else {
+        downNodeId = null;
         // Multi-select with Shift
         if (e.shiftKey) {
           selectionRef.current = { active: true, startX: sx, startY: sy, endX: sx, endY: sy };
         } else {
           panRef.current = { active: true, startX: sx, startY: sy, vpStartX: viewportRef.current.x, vpStartY: viewportRef.current.y };
-          setSelectedNode(null);
-          setSelectedNodeIds(new Set());
         }
       }
     }
@@ -1630,7 +1670,10 @@ export default function MindFlowBrain() {
 
       if (dragRef.current.nodeId) {
         const dx = sx - dragRef.current.startX; const dy = sy - dragRef.current.startY;
-        if (Math.abs(dx) > 15 || Math.abs(dy) > 15) dragRef.current.moved = true;
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+          dragRef.current.moved = true;
+          isDragging = true;
+        }
         if (dragRef.current.moved) {
           const vp = viewportRef.current;
           setNodes(prev => prev.map(n => n.id === dragRef.current.nodeId ? { ...n, x: dragRef.current.nodeStartX + dx / vp.scale, y: dragRef.current.nodeStartY + dy / vp.scale } : n));
@@ -1645,9 +1688,6 @@ export default function MindFlowBrain() {
     }
 
     function onPointerUp(e: PointerEvent) {
-      const rect = canvas!.getBoundingClientRect();
-      const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-
       // Multi-select
       if (selectionRef.current.active) {
         const sel = selectionRef.current;
@@ -1664,39 +1704,31 @@ export default function MindFlowBrain() {
         });
         setSelectedNodeIds(selected);
         selectionRef.current = { active: false, startX: 0, startY: 0, endX: 0, endY: 0 };
+        dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
+        panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
         return;
       }
 
-      if (dragRef.current.nodeId && !dragRef.current.moved) {
-        const hitNode = nodesRef.current.find(n => n.id === dragRef.current.nodeId);
-        if (hitNode) {
-          if (connectMode && connectFrom) {
-            if (hitNode.id !== connectFrom && !hitNode.isBrain) {
-              connectNodes(connectFrom, hitNode.id);
-              setConnectMode(false); setConnectFrom(null);
-            }
-          } else {
-            setSelectedNode({...hitNode});
-            setSelectedNodeIds(new Set([hitNode.id]));
-            // Open project panel for project nodes (check isProject flag, tag, or projectTasks)
-            const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
-            if (isProjectNode) {
-              // Ensure isProject flag is set for legacy nodes
-              if (!hitNode.isProject) {
-                setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
-                hitNode.isProject = true;
-                hitNode.tag = hitNode.tag || 'مشروع';
-              }
-              setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
-            } else {
-              // Close project panel if clicking a non-project node
-              setProjectPanelNode(null);
-            }
-          }
-        }
+      // If we were dragging a node, just stop dragging (don't select)
+      if (isDragging) {
+        dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
+        panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
+        isDragging = false;
+        downNodeId = null;
+        return;
       }
+
+      // If we panned, just stop panning (don't select)
+      if (panRef.current.active) {
+        panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
+        dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
+        downNodeId = null;
+        return;
+      }
+
       dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
       panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
+      downNodeId = null;
     }
 
     function onWheel(e: WheelEvent) {
@@ -1711,7 +1743,7 @@ export default function MindFlowBrain() {
       vp.scale = newScale;
     }
 
-    function onDblClick(e: PointerEvent) {
+    function onDblClick(e: MouseEvent) {
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
       const hit = findNodeAt(sx, sy);
@@ -1726,31 +1758,26 @@ export default function MindFlowBrain() {
       }
     }
 
-    // Backup click handler — ensures node selection works even if pointerup is missed
+    // Primary click handler — simple and reliable
     function onClick(e: MouseEvent) {
-      // Only handle if the pointer handlers didn't already process this click
-      // (selectedNode would already be set if they did)
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
+
+      // If we just finished dragging, don't treat as click
+      if (isDragging) {
+        isDragging = false;
+        return;
+      }
+
       const hit = findNodeAt(sx, sy);
-      if (hit && !connectMode) {
-        // Check if the pointerup handler already selected this node
-        // by comparing with current selectedNode (from ref, not state)
-        setSelectedNode(prev => {
-          if (prev && prev.id === hit.id) return prev; // already selected by pointerup
-          // Pointerup didn't fire or didn't select — do it here
-          setSelectedNodeIds(new Set([hit.id]));
-          const isProjectNode = hit.isProject || hit.tag === 'مشروع' || (hit.projectTasks && hit.projectTasks.length > 0);
-          if (isProjectNode) {
-            if (!hit.isProject) {
-              setNodes(nprev => nprev.map(n => n.id === hit.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
-            }
-            setProjectPanelNode({...hit, isProject: true, tag: hit.tag || 'مشروع'});
-          } else {
-            setProjectPanelNode(null);
-          }
-          return {...hit};
-        });
+      console.log('[MindFlow] Click at screen:', sx, sy, '| hit:', hit ? hit.label : 'none', '| nodes count:', nodesRef.current.length);
+      if (hit) {
+        handleNodeClick(hit);
+      } else {
+        // Clicked on empty space — deselect
+        setSelectedNode(null);
+        setSelectedNodeIds(new Set());
+        setProjectPanelNode(null);
       }
     }
 
@@ -1773,7 +1800,7 @@ export default function MindFlowBrain() {
       canvas.removeEventListener('dblclick', onDblClick);
       canvas.removeEventListener('click', onClick);
     };
-  }, [findNodeAt, connectMode, connectFrom, connectNodes, expandNode, feedBrain]);
+  }, [findNodeAt, connectMode, connectFrom, connectNodes, expandNode, feedBrain, handleNodeClick]);
 
   // ─── Minimap Click ─────────────────────────────────────
   const onMinimapClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -2165,6 +2192,15 @@ export default function MindFlowBrain() {
         <div className={`absolute bottom-20 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-lg text-xs ${theme === 'dark' ? 'bg-cyan-900/50 text-cyan-400' : 'bg-cyan-100 text-cyan-700'}`}>
           تم تحديد {selectedNodeIds.size} عقد
           <Button size="sm" variant="ghost" className="h-5 text-[10px] ml-2 text-red-400" onClick={() => { selectedNodeIds.forEach(id => deleteNode(id)); setSelectedNodeIds(new Set()); }}>🗑️ حذف الكل</Button>
+        </div>
+      )}
+
+      {/* ─── Click Feedback Pulse ────────────────────────── */}
+      {clickFeedback && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-none animate-ping">
+          <div className="px-3 py-1.5 rounded-full bg-cyan-500/30 text-cyan-300 text-xs font-bold">
+            ✨ {clickFeedback.label}
+          </div>
         </div>
       )}
     </div>
