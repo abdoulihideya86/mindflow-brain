@@ -1,14 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import ZAI from 'z-ai-web-dev-sdk';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-// ─── Robust config loader: env vars FIRST, then file fallback ───
+// ─── Robust config loader: env vars → file fallback ──────────
 function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; token?: string; userId?: string } | null {
-  // 1) Try environment variables first (always available in deployed env)
+  // 1) Try environment variables
   if (process.env.ZAI_BASE_URL && process.env.ZAI_API_KEY) {
-    console.log('[Brain API] Loaded config from environment variables');
+    console.log('[Brain API] Config from env vars');
     return {
       baseUrl: process.env.ZAI_BASE_URL,
       apiKey: process.env.ZAI_API_KEY,
@@ -18,7 +17,7 @@ function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; to
     };
   }
 
-  // 2) Fallback to config files
+  // 2) Try config files
   const configPaths = [
     join(process.cwd(), '.z-ai-config'),
     join(homedir(), '.z-ai-config'),
@@ -29,7 +28,7 @@ function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; to
       const configStr = readFileSync(filePath, 'utf-8');
       const config = JSON.parse(configStr);
       if (config.baseUrl && config.apiKey) {
-        console.log(`[Brain API] Loaded config from file: ${filePath}`);
+        console.log(`[Brain API] Config from file: ${filePath}`);
         return config;
       }
     } catch (err: unknown) {
@@ -40,8 +39,39 @@ function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; to
     }
   }
 
-  console.error('[Brain API] No config found: env vars missing and no config file');
   return null;
+}
+
+// ─── Direct AI API call (bypasses SDK to avoid init issues) ──
+async function callAI(
+  config: { baseUrl: string; apiKey: string; chatId?: string; token?: string; userId?: string },
+  messages: { role: string; content: string }[],
+  temperature = 0.7,
+): Promise<string> {
+  const url = `${config.baseUrl}/chat/completions`;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${config.apiKey}`,
+    'X-Z-AI-From': 'Z',
+  };
+  if (config.chatId) headers['X-Chat-Id'] = config.chatId;
+  if (config.userId) headers['X-User-Id'] = config.userId;
+  if (config.token) headers['X-Token'] = config.token;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ messages, temperature, thinking: { type: 'disabled' } }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`[Brain API] AI request failed (${response.status}):`, errorBody.substring(0, 200));
+    throw new Error(`AI request failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content || '';
 }
 
 export async function POST(req: NextRequest) {
@@ -49,20 +79,9 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { action } = body;
 
-    // Initialize ZAI SDK
-    let zai: InstanceType<typeof ZAI>;
-    try {
-      const config = loadZAIConfig();
-      if (!config) {
-        return NextResponse.json({
-          error: 'AI service unavailable',
-          summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً'
-        }, { status: 503 });
-      }
-      zai = new ZAI(config);
-      console.log('[Brain API] ZAI SDK initialized successfully');
-    } catch (sdkError) {
-      console.error('[Brain API] ZAI SDK init error:', sdkError);
+    const config = loadZAIConfig();
+    if (!config) {
+      console.error('[Brain API] No config found in env vars or files');
       return NextResponse.json({
         error: 'AI service unavailable',
         summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً'
@@ -77,15 +96,11 @@ export async function POST(req: NextRequest) {
           .map((n: { label: string; tag: string; summary: string }) => `${n.label} (${n.tag}): ${n.summary}`)
           .join('\n');
 
-        const completion = await zai.chat.completions.create({
-          messages: [
-            { role: 'system', content: 'أنت عقل معرفي ذكي. قدم تحليلاً مختصراً وعميقاً بالعربية للشبكة المعرفية. اكتب ملخصاً من 3-4 جمل يربط المواضيع ويكشف أنماطاً خفية. ثم اطرح سؤالين مثيرين للتفكير.' },
-            { role: 'user', content: `شبكة معرفية تحوي ${nodes.length} عقدة بمستوى معرفة ${brainKnowledge}:\n${nodeDescriptions}` },
-          ],
-          temperature: 0.7,
-        });
+        const text = await callAI(config, [
+          { role: 'system', content: 'أنت عقل معرفي ذكي. قدم تحليلاً مختصراً وعميقاً بالعربية للشبكة المعرفية. اكتب ملخصاً من 3-4 جمل يربط المواضيع ويكشف أنماطاً خفية. ثم اطرح سؤالين مثيرين للتفكير.' },
+          { role: 'user', content: `شبكة معرفية تحوي ${nodes.length} عقدة بمستوى معرفة ${brainKnowledge}:\n${nodeDescriptions}` },
+        ], 0.7);
 
-        const text = completion.choices[0]?.message?.content || '';
         const parts = text.split(/سؤال\s*\d*[.:]/);
         const summary = parts[0]?.trim() || '';
         const questions = parts.slice(1).map(q => q.trim()).filter(q => q.length > 5);
@@ -101,32 +116,26 @@ export async function POST(req: NextRequest) {
           .map((n: { id: string; label: string; tag: string; summary: string }) => `ID:${n.id} | ${n.label} (${n.tag}): ${n.summary}`)
           .join('\n');
 
-        const completion = await zai.chat.completions.create({
-          messages: [
-            { role: 'system', content: 'أنت محلل شبكات معرفية. اقترح 3 روابط خفية بين عقد لا تبدو مرتبطة. أجب بصيغة JSON فقط: {"links":[{"from":"id","to":"id","reason":"السبب"}]}' },
-            { role: 'user', content: nodeList },
-          ],
-          temperature: 0.8,
-        });
+        const text = await callAI(config, [
+          { role: 'system', content: 'أنت محلل شبكات معرفية. اقترح 3 روابط خفية بين عقد لا تبدو مرتبطة. أجب بصيغة JSON فقط: {"links":[{"from":"id","to":"id","reason":"السبب"}]}' },
+          { role: 'user', content: nodeList },
+        ], 0.8);
 
         let links = [];
-        try { const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/); if (m) links = JSON.parse(m[0]).links || []; } catch {}
+        try { const m = text.match(/\{[\s\S]*\}/); if (m) links = JSON.parse(m[0]).links || []; } catch {}
 
         return NextResponse.json({ suggestedLinks: links });
       }
 
       case 'generate-nodes': {
         const { nodeLabel, nodeTag, nodeSummary } = body;
-        const completion = await zai.chat.completions.create({
-          messages: [
-            { role: 'system', content: 'أنت مولد معرفة. اقترح 4 عقد فرعية جديدة. أجب بصيغة JSON فقط: {"nodes":[{"label":"الاسم","tag":"التصنيف","summary":"الوصف"}]}' },
-            { role: 'user', content: `الموضوع: ${nodeLabel} (${nodeTag})\nالوصف: ${nodeSummary}` },
-          ],
-          temperature: 0.8,
-        });
+        const text = await callAI(config, [
+          { role: 'system', content: 'أنت مولد معرفة. اقترح 4 عقد فرعية جديدة. أجب بصيغة JSON فقط: {"nodes":[{"label":"الاسم","tag":"التصنيف","summary":"الوصف"}]}' },
+          { role: 'user', content: `الموضوع: ${nodeLabel} (${nodeTag})\nالوصف: ${nodeSummary}` },
+        ], 0.8);
 
         let newNodes = [];
-        try { const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/); if (m) newNodes = JSON.parse(m[0]).nodes || []; } catch {}
+        try { const m = text.match(/\{[\s\S]*\}/); if (m) newNodes = JSON.parse(m[0]).nodes || []; } catch {}
 
         return NextResponse.json({ suggestedNodes: newNodes });
       }
@@ -138,27 +147,23 @@ export async function POST(req: NextRequest) {
           .map((n: { label: string; summary: string }) => `${n.label}: ${n.summary}`)
           .join('\n');
 
-        const completion = await zai.chat.completions.create({
-          messages: [
-            { role: 'system', content: 'أنت عقل معرفي ذكي. أجب على السؤال بناءً على المعرفة المتاحة. كن مختصراً (3-4 جمل) وعميقاً.' },
-            { role: 'user', content: `المعرفة:\n${nodeDescriptions}\n\nالسؤال: ${question}` },
-          ],
-          temperature: 0.6,
-        });
+        const answer = await callAI(config, [
+          { role: 'system', content: 'أنت عقل معرفي ذكي. أجب على السؤال بناءً على المعرفة المتاحة. كن مختصراً (3-4 جمل) وعميقاً.' },
+          { role: 'user', content: `المعرفة:\n${nodeDescriptions}\n\nالسؤال: ${question}` },
+        ], 0.6);
 
-        return NextResponse.json({ answer: completion.choices[0]?.message?.content || '' });
+        return NextResponse.json({ answer });
       }
 
       // 💡 Analyze an idea and create a project plan
       case 'analyze-idea': {
         const { idea } = body;
-        console.log('[Brain API] analyze-idea called with idea:', idea?.substring(0, 50));
+        console.log('[Brain API] analyze-idea:', idea?.substring(0, 50));
 
-        const completion = await zai.chat.completions.create({
-          messages: [
-            {
-              role: 'system',
-              content: `أنت محلل مشاريع ذكي. حوّل الفكرة التالية إلى خطة مشروع مفصلة. أجب بصيغة JSON فقط بهذا الشكل:
+        const text = await callAI(config, [
+          {
+            role: 'system',
+            content: `أنت محلل مشاريع ذكي. حوّل الفكرة التالية إلى خطة مشروع مفصلة. أجب بصيغة JSON فقط بهذا الشكل:
 {
   "title": "اسم المشروع",
   "description": "وصف مختصر",
@@ -175,39 +180,31 @@ export async function POST(req: NextRequest) {
   "estimatedNodes": 10
 }
 اجعل المشروع واقعياً وقابلاً للتنفيذ. 3-5 مراحل لكل منها 2-4 مهام. كل شيء بالعربية.`,
-            },
-            { role: 'user', content: `الفكرة: ${idea}` },
-          ],
-          temperature: 0.7,
-        });
+          },
+          { role: 'user', content: `الفكرة: ${idea}` },
+        ], 0.7);
 
         let analysis = null;
         try {
-          const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/);
+          const m = text.match(/\{[\s\S]*\}/);
           if (m) analysis = JSON.parse(m[0]);
         } catch (parseErr) {
-          console.error('[Brain API] Failed to parse analyze-idea response:', parseErr);
+          console.error('[Brain API] JSON parse error:', parseErr);
         }
 
-        console.log('[Brain API] analyze-idea result:', analysis ? 'success' : 'no analysis generated');
+        console.log('[Brain API] analyze-idea:', analysis ? 'success' : 'no analysis');
         return NextResponse.json({ analysis });
       }
 
       // 💡 Execute a project task
       case 'execute-task': {
         const { taskLabel, taskDescription, projectContext } = body;
-        const completion = await zai.chat.completions.create({
-          messages: [
-            {
-              role: 'system',
-              content: 'أنت منفذ مهام ذكي. نفذ المهمة التالية وقدم نتيجة مفصلة بالعربية (3-5 جمل). اشرح ما تم إنجازه والخطوات التالية.',
-            },
-            { role: 'user', content: `المشروع: ${projectContext}\nالمهمة: ${taskLabel}\nالوصف: ${taskDescription}` },
-          ],
-          temperature: 0.6,
-        });
+        const result = await callAI(config, [
+          { role: 'system', content: 'أنت منفذ مهام ذكي. نفذ المهمة التالية وقدم نتيجة مفصلة بالعربية (3-5 جمل). اشرح ما تم إنجازه والخطوات التالية.' },
+          { role: 'user', content: `المشروع: ${projectContext}\nالمهمة: ${taskLabel}\nالوصف: ${taskDescription}` },
+        ], 0.6);
 
-        return NextResponse.json({ result: completion.choices[0]?.message?.content || '' });
+        return NextResponse.json({ result });
       }
 
       // 🎓 Generate quiz questions
@@ -218,11 +215,10 @@ export async function POST(req: NextRequest) {
           .map((n: { label: string; tag: string; summary: string }) => `${n.label} (${n.tag}): ${n.summary}`)
           .join('\n');
 
-        const completion = await zai.chat.completions.create({
-          messages: [
-            {
-              role: 'system',
-              content: `أنت معلّم ذكي. بناءً على المعرفة التالية، أنشئ سؤال اختيار من متعدد. أجب بصيغة JSON فقط:
+        const text = await callAI(config, [
+          {
+            role: 'system',
+            content: `أنت معلّم ذكي. بناءً على المعرفة التالية، أنشئ سؤال اختيار من متعدد. أجب بصيغة JSON فقط:
 {
   "question": "السؤال",
   "options": ["خيار1", "خيار2", "خيار3", "خيار4"],
@@ -230,15 +226,13 @@ export async function POST(req: NextRequest) {
   "explanation": "شرح الإجابة الصحيحة"
 }
 اجعل الأسئلة مثيرة وتربط بين مواضيع مختلفة. كل شيء بالعربية.`,
-            },
-            { role: 'user', content: nodeDescriptions },
-          ],
-          temperature: 0.8,
-        });
+          },
+          { role: 'user', content: nodeDescriptions },
+        ], 0.8);
 
         let quiz = null;
         try {
-          const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/);
+          const m = text.match(/\{[\s\S]*\}/);
           if (m) quiz = JSON.parse(m[0]);
         } catch {}
 
@@ -253,26 +247,23 @@ export async function POST(req: NextRequest) {
           .map((n: { label: string; tag: string; summary: string }) => `${n.label} (${n.tag}): ${n.summary}`)
           .join('\n');
 
-        const completion = await zai.chat.completions.create({
-          messages: [
-            {
-              role: 'system',
-              content: `أنت محلل معرفي ذكي. حلل الشبكة المعرفية التالية واكتشف الفجوات — ما المعرفة الناقصة؟ اقترح عقد جديدة وروابط تثري الشبكة. أجب بصيغة JSON فقط:
+        const text = await callAI(config, [
+          {
+            role: 'system',
+            content: `أنت محلل معرفي ذكي. حلل الشبكة المعرفية التالية واكتشف الفجوات — ما المعرفة الناقصة؟ اقترح عقد جديدة وروابط تثري الشبكة. أجب بصيغة JSON فقط:
 {
   "newNodes": [{"label": "اسم العقدة", "tag": "التصنيف", "summary": "الوصف"}],
   "newLinks": [{"fromLabel": "اسم عقدة موجودة", "toLabel": "اسم عقدة موجودة أو جديدة", "reason": "السبب"}],
   "insights": ["رؤية 1", "رؤية 2"]
 }
 3-5 عقد جديدة و 2-3 روابط و 2 رؤى. كل شيء بالعربية.`,
-            },
-            { role: 'user', content: `الشبكة (معرفة: ${brainKnowledge}):\n${nodeDescriptions || 'الشبكة فارغة'}` },
-          ],
-          temperature: 0.8,
-        });
+          },
+          { role: 'user', content: `الشبكة (معرفة: ${brainKnowledge}):\n${nodeDescriptions || 'الشبكة فارغة'}` },
+        ], 0.8);
 
         let result = { newNodes: [], newLinks: [], insights: [] };
         try {
-          const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/);
+          const m = text.match(/\{[\s\S]*\}/);
           if (m) result = JSON.parse(m[0]);
         } catch {}
 
@@ -284,6 +275,10 @@ export async function POST(req: NextRequest) {
     }
   } catch (error) {
     console.error('[Brain API] Unhandled error:', error);
-    return NextResponse.json({ error: 'Failed', summary: 'حدث خطأ غير متوقع' }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({
+      error: 'Failed',
+      summary: `حدث خطأ: ${message}`
+    }, { status: 500 });
   }
 }
