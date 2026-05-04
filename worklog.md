@@ -59,7 +59,7 @@ Stage Summary:
 ---
 Task ID: 5
 Agent: Main Agent
-Task: Fix blank preview panel - user saw white page with Z logo instead of MindFlow app
+Task: Fix blank preview panel - user saw white page with Z logo instead of MindFlow app preview
 
 Work Log:
 - Analyzed user screenshot with VLM - confirmed they were seeing the chat.z.ai interface, not the MindFlow app preview
@@ -75,3 +75,32 @@ Stage Summary:
 - App verified working via browser testing
 - Old localStorage data cleared to prevent conflicts
 - Server instability is an environment issue, not app code issue
+
+---
+Task ID: 6
+Agent: Main Agent
+Task: Fix node clicking not working (React error #418 hydration mismatch) + Fix AI service unavailable
+
+Work Log:
+- Read full page.tsx (2245 lines) to understand current code state
+- Analyzed user's F12 console screenshot showing "Minified React error #418"
+- React error #418 = hydration mismatch: getInitialState() accessed window/localStorage during initial render
+  - Server renders with empty nodes (typeof window === 'undefined' guard)
+  - Client hydration renders with full nodes from localStorage
+  - DOM mismatch → React fails to attach event handlers → clicks don't work
+- Fixed by changing state initialization approach:
+  - Removed getInitialState() from useState initializer
+  - All state now starts with server-safe defaults (empty arrays, defaultStats())
+  - Added `mounted` state flag (initially false)
+  - localStorage loading moved to useEffect that runs AFTER hydration
+  - Added loading screen ("جاري تحميل العقل") that shows until mounted=true
+- Verified: SSR HTML now consistently shows loading screen (same on server and client)
+- Verified: API route /api/brain works correctly (tested with curl, returns Arabic AI summaries)
+- The 404 error in console was a side effect of the hydration crash, not a missing route
+- Build succeeds: `npx next build` compiles with 0 errors
+
+Stage Summary:
+- ROOT CAUSE: React hydration mismatch (error #418) prevented event handler attachment
+- FIX: Deferred localStorage loading to useEffect after mount + added mounted guard
+- AI API route (/api/brain) is functional and returns correct responses
+- Build succeeds, SSR output is consistent between server and client

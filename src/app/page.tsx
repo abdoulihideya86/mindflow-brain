@@ -273,87 +273,15 @@ export default function MindFlowBrain() {
   const historyIndexRef = useRef(-1);
   const skipHistoryRef = useRef(false);
 
-  // ─── Lazy Initializer ──────────────────────────────────
-  const getInitialState = () => {
-    if (typeof window === 'undefined') {
-      return { nodes: [] as MindNode[], edges: [] as MindEdge[], stats: defaultStats(), explored: [] as string[], unlockedAch: [] as string[] };
-    }
-    const cx = window.innerWidth / 2;
-    const cy = window.innerHeight / 2;
+  // ─── Hydration-safe initialization ──────────────────────
+  // FIX: Always start with empty/server-safe defaults so SSR and client
+  // initial render match perfectly (no hydration mismatch = React error #418).
+  // Real data from localStorage is loaded in useEffect after mount.
+  const [mounted, setMounted] = useState(false);
 
-    // Try full state first (includes projects, edges, all data)
-    const fullPersisted = loadFullState();
-    if (fullPersisted) {
-      const brain = fullPersisted.nodes.find(n => n.isBrain);
-      // Reposition brain to center of current viewport
-      const offsetX = brain ? cx - brain.x : 0;
-      const offsetY = brain ? cy - brain.y : 0;
-      const restoredNodes = fullPersisted.nodes.map(n => {
-        // Fill in missing properties from older saves to prevent runtime errors
-        const defaults: Partial<MindNode> = {
-          isBrain: false, isCustom: false, expanded: false, hasChildren: false,
-          connections: [], knowledgeLevel: 0, color: '#00ffe0', pulsePhase: Math.random() * Math.PI * 2,
-          maturity: 'seed', dormant: false, lastFedAt: Date.now(), visitCount: 0,
-          alliedWith: [], aiSummary: '', aiQuestions: [], aiSuggestedLinks: [],
-          feedParticles: [],
-          isProject: false, projectPhase: 'idea', projectProgress: 0, projectTasks: [],
-          quizQuestion: undefined, quizOptions: undefined, quizCorrectIndex: undefined,
-          enterAnim: 1, selected: false,
-          childrenData: undefined,
-        };
-        return {
-          ...defaults,
-          ...n,
-          x: n.x + offsetX,
-          y: n.y + offsetY,
-          feedParticles: [],
-          enterAnim: 1,
-          selected: false,
-        };
-      });
-      const restoredEdges = fullPersisted.edges.map(e => ({ ...e }));
-      const restoredStats = { ...defaultStats(), ...fullPersisted.brainStats };
-      return {
-        nodes: restoredNodes,
-        edges: restoredEdges,
-        stats: restoredStats,
-        explored: fullPersisted.exploredTopics || [],
-        unlockedAch: fullPersisted.unlockedAchievements || [],
-      };
-    }
-
-    // Fallback: legacy persistence (only custom nodes, no edges)
-    const brain = createBrainNode(cx, cy);
-    const persisted = loadState();
-    let initialNodes = [brain];
-    let initialStats = defaultStats();
-    let initialExplored: string[] = [];
-    let initialUnlockedAch: string[] = [];
-
-    if (persisted) {
-      initialStats = { ...defaultStats(), ...persisted.brainStats };
-      initialExplored = persisted.exploredTopics;
-      initialUnlockedAch = persisted.unlockedAchievements || [];
-      persisted.customNodes.forEach((cn, i) => {
-        const angle = (i / Math.max(1, persisted.customNodes.length)) * Math.PI * 2 - Math.PI / 2;
-        const dist = 220 + Math.random() * 80;
-        initialNodes.push(makeNode({
-          id: nid(), label: cn.label, tag: cn.tag || 'مخصص', summary: cn.summary,
-          x: cx + Math.cos(angle) * dist, y: cy + Math.sin(angle) * dist,
-          depth: 1, parentId: BRAIN_ID, isCustom: true,
-          connections: [BRAIN_ID], knowledgeLevel: 50, color: '#ff6b9d',
-          maturity: 'sprout', visitCount: 5, enterAnim: 1,
-        }));
-        initialStats.totalNodes++;
-      });
-    }
-    return { nodes: initialNodes, edges: [] as MindEdge[], stats: initialStats, explored: initialExplored, unlockedAch: initialUnlockedAch };
-  };
-
-  const [initialData] = useState(getInitialState);
-  const [nodes, setNodes] = useState<MindNode[]>(initialData.nodes);
-  const [edges, setEdges] = useState<MindEdge[]>(initialData.edges);
-  const [brainStats, setBrainStats] = useState<BrainStats>(initialData.stats);
+  const [nodes, setNodes] = useState<MindNode[]>([]);
+  const [edges, setEdges] = useState<MindEdge[]>([]);
+  const [brainStats, setBrainStats] = useState<BrainStats>(defaultStats());
   const [selectedNode, setSelectedNode] = useState<MindNode | null>(null);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [newLabel, setNewLabel] = useState('');
@@ -361,7 +289,7 @@ export default function MindFlowBrain() {
   const [newSummary, setNewSummary] = useState('');
   const [connectMode, setConnectMode] = useState(false);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
-  const [exploredTopics, setExploredTopics] = useState<string[]>(initialData.explored);
+  const [exploredTopics, setExploredTopics] = useState<string[]>([]);
   const [showStats, setShowStats] = useState(false);
 
   // 🔍 Search
@@ -412,7 +340,7 @@ export default function MindFlowBrain() {
   const [autoLearnInsights, setAutoLearnInsights] = useState<string[]>([]);
 
   // 🏆 Achievements
-  const [unlockedAchievements, setUnlockedAchievements] = useState<string[]>(initialData.unlockedAch);
+  const [unlockedAchievements, setUnlockedAchievements] = useState<string[]>([]);
   const [achievementToast, setAchievementToast] = useState<Achievement | null>(null);
 
   // 🖱️ Click feedback — shows a brief pulse when a node is clicked
@@ -423,6 +351,82 @@ export default function MindFlowBrain() {
 
   // Edge flow particles
   const edgeParticlesRef = useRef<{ edgeId: string; progress: number; speed: number }[]>([]);
+
+  // ─── Load persisted state after mount (fixes hydration mismatch) ──
+  useEffect(() => {
+    if (mounted) return; // Only run once
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+
+    // Try full state first (includes projects, edges, all data)
+    const fullPersisted = loadFullState();
+    if (fullPersisted) {
+      const brain = fullPersisted.nodes.find(n => n.isBrain);
+      const offsetX = brain ? cx - brain.x : 0;
+      const offsetY = brain ? cy - brain.y : 0;
+      const restoredNodes = fullPersisted.nodes.map(n => {
+        const defaults: Partial<MindNode> = {
+          isBrain: false, isCustom: false, expanded: false, hasChildren: false,
+          connections: [], knowledgeLevel: 0, color: '#00ffe0', pulsePhase: Math.random() * Math.PI * 2,
+          maturity: 'seed', dormant: false, lastFedAt: Date.now(), visitCount: 0,
+          alliedWith: [], aiSummary: '', aiQuestions: [], aiSuggestedLinks: [],
+          feedParticles: [],
+          isProject: false, projectPhase: 'idea', projectProgress: 0, projectTasks: [],
+          quizQuestion: undefined, quizOptions: undefined, quizCorrectIndex: undefined,
+          enterAnim: 1, selected: false,
+          childrenData: undefined,
+        };
+        return {
+          ...defaults,
+          ...n,
+          x: n.x + offsetX,
+          y: n.y + offsetY,
+          feedParticles: [],
+          enterAnim: 1,
+          selected: false,
+        };
+      });
+      const restoredEdges = fullPersisted.edges.map(e => ({ ...e }));
+      const restoredStats = { ...defaultStats(), ...fullPersisted.brainStats };
+      setNodes(restoredNodes);
+      setEdges(restoredEdges);
+      setBrainStats(restoredStats);
+      setExploredTopics(fullPersisted.exploredTopics || []);
+      setUnlockedAchievements(fullPersisted.unlockedAchievements || []);
+    } else {
+      // Fallback: legacy persistence or create fresh brain
+      const brain = createBrainNode(cx, cy);
+      const persisted = loadState();
+      let initialNodes = [brain];
+      let initialStats = defaultStats();
+      let initialExplored: string[] = [];
+      let initialUnlockedAch: string[] = [];
+
+      if (persisted) {
+        initialStats = { ...defaultStats(), ...persisted.brainStats };
+        initialExplored = persisted.exploredTopics;
+        initialUnlockedAch = persisted.unlockedAchievements || [];
+        persisted.customNodes.forEach((cn, i) => {
+          const angle = (i / Math.max(1, persisted.customNodes.length)) * Math.PI * 2 - Math.PI / 2;
+          const dist = 220 + Math.random() * 80;
+          initialNodes.push(makeNode({
+            id: nid(), label: cn.label, tag: cn.tag || 'مخصص', summary: cn.summary,
+            x: cx + Math.cos(angle) * dist, y: cy + Math.sin(angle) * dist,
+            depth: 1, parentId: BRAIN_ID, isCustom: true,
+            connections: [BRAIN_ID], knowledgeLevel: 50, color: '#ff6b9d',
+            maturity: 'sprout', visitCount: 5, enterAnim: 1,
+          }));
+          initialStats.totalNodes++;
+        });
+      }
+      setNodes(initialNodes);
+      setEdges([]);
+      setBrainStats(initialStats);
+      setExploredTopics(initialExplored);
+      setUnlockedAchievements(initialUnlockedAch);
+    }
+    setMounted(true);
+  }, [mounted]);
 
   // ─── Sync refs ─────────────────────────────────────────
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
@@ -1865,6 +1869,18 @@ export default function MindFlowBrain() {
   const topicKeys = Object.keys(KNOWLEDGE_BASE);
 
   // ─── JSX ───────────────────────────────────────────────
+  // Don't render canvas until mounted — prevents hydration mismatch (React error #418)
+  if (!mounted) {
+    return (
+      <div className="w-screen h-screen flex items-center justify-center" style={{ background: '#050508' }}>
+        <div className="text-center">
+          <div className="text-4xl mb-3 animate-pulse">🧠</div>
+          <div className="text-yellow-400/70 text-sm">جاري تحميل العقل...</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div ref={containerRef} className="relative w-screen h-screen overflow-hidden" style={{ background: theme === 'dark' ? '#050508' : '#f0f0f5', pointerEvents: 'none' }}>
       {/* Canvas */}
