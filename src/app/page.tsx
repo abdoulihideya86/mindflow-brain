@@ -102,7 +102,7 @@ interface FullPersistedState {
   unlockedAchievements: string[];
 }
 
-const FULL_STORAGE_KEY = 'mindflow_brain_full_v4';
+const FULL_STORAGE_KEY = 'mindflow_brain_full_v5';
 
 function loadState(): PersistedState | null {
   if (typeof window === 'undefined') return null;
@@ -116,7 +116,7 @@ function loadFullState(): FullPersistedState | null {
     const r = localStorage.getItem(FULL_STORAGE_KEY);
     if (r) {
       const parsed = JSON.parse(r);
-      if (parsed.version === 4) return parsed;
+      if (parsed.version >= 5) return parsed;
     }
   } catch { /* */ }
   return null;
@@ -133,7 +133,7 @@ function saveFullState(stats: BrainStats, allNodes: MindNode[], allEdges: MindEd
       selected: false,
     }));
     const data: FullPersistedState = {
-      version: 4,
+      version: 5,
       brainStats: stats,
       nodes: cleanNodes,
       edges: allEdges,
@@ -1620,146 +1620,168 @@ export default function MindFlowBrain() {
 
   // ─── Node click handler (shared logic) ────────────────────
   const handleNodeClick = useCallback((hitNode: MindNode) => {
-    try {
-      // Visual feedback
-      setClickFeedback({ x: hitNode.x, y: hitNode.y, label: hitNode.label });
-      setTimeout(() => setClickFeedback(null), 800);
+    // Visual feedback
+    setClickFeedback({ x: hitNode.x, y: hitNode.y, label: hitNode.label });
+    setTimeout(() => setClickFeedback(null), 800);
 
-      if (connectMode && connectFrom) {
-        if (hitNode.id !== connectFrom && !hitNode.isBrain) {
-          connectNodes(connectFrom, hitNode.id);
-          setConnectMode(false); setConnectFrom(null);
-        }
-        return;
+    if (connectMode && connectFrom) {
+      if (hitNode.id !== connectFrom && !hitNode.isBrain) {
+        connectNodes(connectFrom, hitNode.id);
+        setConnectMode(false); setConnectFrom(null);
       }
-      setSelectedNode({...hitNode});
-      setSelectedNodeIds(new Set([hitNode.id]));
-      // Open project panel for project nodes
-      const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
-      if (isProjectNode) {
-        if (!hitNode.isProject) {
-          setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
-        }
-        setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
-      } else {
-        setProjectPanelNode(null);
-      }
-      sounds.searchFound();
-    } catch (err) {
-      console.error('[MindFlow] Error in handleNodeClick:', err);
+      return;
     }
+    setSelectedNode({...hitNode});
+    setSelectedNodeIds(new Set([hitNode.id]));
+    // Open project panel for project nodes
+    const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
+    if (isProjectNode) {
+      if (!hitNode.isProject) {
+        setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
+      }
+      setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
+    } else {
+      setProjectPanelNode(null);
+    }
+    sounds.searchFound();
   }, [connectMode, connectFrom, connectNodes]);
 
-  // ─── Mouse/Touch Handlers ──────────────────────────────
-  // Use refs for handler functions so the useEffect doesn't re-register
-  // event listeners on every state change (which was causing clicks to be lost)
-  const handleNodeClickRef = useRef(handleNodeClick);
-  const expandNodeRef = useRef(expandNode);
-  const feedBrainRef = useRef(feedBrain);
+  // ─── Mouse/Touch Handlers (React events + minimal addEventListener) ──
+  // Track tap/drag state in refs so they persist across re-renders
+  const tapRef = useRef<{ nodeId: string | null; isDragging: boolean }>({ nodeId: null, isDragging: false });
 
-  useEffect(() => { handleNodeClickRef.current = handleNodeClick; }, [handleNodeClick]);
-  useEffect(() => { expandNodeRef.current = expandNode; }, [expandNode]);
-  useEffect(() => { feedBrainRef.current = feedBrain; }, [feedBrain]);
+  // Canvas pointer DOWN
+  const onCanvasPointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    tapRef.current = { nodeId: null, isDragging: false };
 
+    const hit = findNodeAt(sx, sy);
+    if (hit) {
+      tapRef.current.nodeId = hit.id;
+      dragRef.current = { nodeId: hit.id, startX: sx, startY: sy, nodeStartX: hit.x, nodeStartY: hit.y, moved: false };
+    } else {
+      if (e.shiftKey) {
+        selectionRef.current = { active: true, startX: sx, startY: sy, endX: sx, endY: sy };
+      } else {
+        panRef.current = { active: true, startX: sx, startY: sy, vpStartX: viewportRef.current.x, vpStartY: viewportRef.current.y };
+      }
+    }
+  }, [findNodeAt]);
+
+  // Canvas pointer MOVE
+  const onCanvasPointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+
+    if (dragRef.current.nodeId) {
+      const dx = sx - dragRef.current.startX;
+      const dy = sy - dragRef.current.startY;
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+        dragRef.current.moved = true;
+        tapRef.current.isDragging = true;
+        tapRef.current.nodeId = null;
+      }
+      if (dragRef.current.moved) {
+        const vp = viewportRef.current;
+        setNodes(prev => prev.map(n => n.id === dragRef.current.nodeId ? { ...n, x: dragRef.current.nodeStartX + dx / vp.scale, y: dragRef.current.nodeStartY + dy / vp.scale } : n));
+      }
+    } else if (selectionRef.current.active) {
+      selectionRef.current.endX = sx; selectionRef.current.endY = sy;
+    } else if (panRef.current.active) {
+      const dx = sx - panRef.current.startX;
+      const dy = sy - panRef.current.startY;
+      viewportRef.current.x = panRef.current.vpStartX + dx;
+      viewportRef.current.y = panRef.current.vpStartY + dy;
+    }
+  }, []);
+
+  // Canvas pointer UP — handles end of drag, multi-select, and empty space taps
+  const onCanvasPointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    // Multi-select
+    if (selectionRef.current.active) {
+      const sel = selectionRef.current;
+      const vp = viewportRef.current;
+      const wx1 = Math.min(sel.startX, sel.endX); const wy1 = Math.min(sel.startY, sel.endY);
+      const wx2 = Math.max(sel.startX, sel.endX); const wy2 = Math.max(sel.startY, sel.endY);
+      const worldX1 = (wx1 - vp.x) / vp.scale; const worldY1 = (wy1 - vp.y) / vp.scale;
+      const worldX2 = (wx2 - vp.x) / vp.scale; const worldY2 = (wy2 - vp.y) / vp.scale;
+      const selected = new Set<string>();
+      nodesRef.current.forEach(n => {
+        if (n.x >= worldX1 && n.x <= worldX2 && n.y >= worldY1 && n.y <= worldY2 && !n.isBrain) {
+          selected.add(n.id);
+        }
+      });
+      setSelectedNodeIds(selected);
+      selectionRef.current = { active: false, startX: 0, startY: 0, endX: 0, endY: 0 };
+      cleanupDrag();
+      return;
+    }
+
+    // Empty space tap — deselect (node clicks handled by onCanvasClick)
+    if (!tapRef.current.nodeId && !tapRef.current.isDragging && panRef.current.active) {
+      setSelectedNode(null);
+      setSelectedNodeIds(new Set());
+      setProjectPanelNode(null);
+    }
+
+    cleanupDrag();
+  }, []);
+
+  // Canvas CLICK — PRIMARY node selection handler (most reliable event)
+  const onCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const hit = findNodeAt(sx, sy);
+    if (hit && !dragRef.current.moved) {
+      handleNodeClick(hit);
+    } else if (!hit) {
+      setSelectedNode(null);
+      setSelectedNodeIds(new Set());
+      setProjectPanelNode(null);
+    }
+    // Reset drag moved flag after click
+    dragRef.current.moved = false;
+  }, [findNodeAt, handleNodeClick]);
+
+  // Canvas double click
+  const onCanvasDblClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const hit = findNodeAt(sx, sy);
+    if (hit) {
+      if (hit.hasChildren || hit.childrenData?.length) {
+        expandNode(hit.id);
+      } else {
+        feedBrain(hit.id);
+      }
+    } else {
+      setAddDialogOpen(true);
+    }
+  }, [findNodeAt, expandNode, feedBrain]);
+
+  function cleanupDrag() {
+    dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
+    panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
+    tapRef.current = { nodeId: null, isDragging: false };
+  }
+
+  // Wheel zoom and touch prevention — need addEventListener for non-passive
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    // Track if a node was tapped (not dragged) — stored in refs so they survive across re-renders
-    let tapNodeId: string | null = null;
-    let isDragging = false;
-
-    function onPointerDown(e: PointerEvent) {
-      const rect = canvas!.getBoundingClientRect();
-      const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-      isDragging = false;
-      tapNodeId = null;
-
-      const hit = findNodeAt(sx, sy);
-      if (hit) {
-        tapNodeId = hit.id;
-        dragRef.current = { nodeId: hit.id, startX: sx, startY: sy, nodeStartX: hit.x, nodeStartY: hit.y, moved: false };
-      } else {
-        // Multi-select with Shift
-        if (e.shiftKey) {
-          selectionRef.current = { active: true, startX: sx, startY: sy, endX: sx, endY: sy };
-        } else {
-          panRef.current = { active: true, startX: sx, startY: sy, vpStartX: viewportRef.current.x, vpStartY: viewportRef.current.y };
-        }
-      }
-    }
-
-    function onPointerMove(e: PointerEvent) {
-      const rect = canvas!.getBoundingClientRect();
-      const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-
-      if (dragRef.current.nodeId) {
-        const dx = sx - dragRef.current.startX; const dy = sy - dragRef.current.startY;
-        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
-          dragRef.current.moved = true;
-          isDragging = true;
-          tapNodeId = null; // Cancelled tap — it's a drag
-        }
-        if (dragRef.current.moved) {
-          const vp = viewportRef.current;
-          setNodes(prev => prev.map(n => n.id === dragRef.current.nodeId ? { ...n, x: dragRef.current.nodeStartX + dx / vp.scale, y: dragRef.current.nodeStartY + dy / vp.scale } : n));
-        }
-      } else if (selectionRef.current.active) {
-        selectionRef.current.endX = sx; selectionRef.current.endY = sy;
-      } else if (panRef.current.active) {
-        const dx = sx - panRef.current.startX; const dy = sy - panRef.current.startY;
-        viewportRef.current.x = panRef.current.vpStartX + dx;
-        viewportRef.current.y = panRef.current.vpStartY + dy;
-      }
-    }
-
-    function onPointerUp(e: PointerEvent) {
-      // Multi-select
-      if (selectionRef.current.active) {
-        const sel = selectionRef.current;
-        const vp = viewportRef.current;
-        const wx1 = Math.min(sel.startX, sel.endX); const wy1 = Math.min(sel.startY, sel.endY);
-        const wx2 = Math.max(sel.startX, sel.endX); const wy2 = Math.max(sel.startY, sel.endY);
-        const worldX1 = (wx1 - vp.x) / vp.scale; const worldY1 = (wy1 - vp.y) / vp.scale;
-        const worldX2 = (wx2 - vp.x) / vp.scale; const worldY2 = (wy2 - vp.y) / vp.scale;
-        const selected = new Set<string>();
-        nodesRef.current.forEach(n => {
-          if (n.x >= worldX1 && n.x <= worldX2 && n.y >= worldY1 && n.y <= worldY2 && !n.isBrain) {
-            selected.add(n.id);
-          }
-        });
-        setSelectedNodeIds(selected);
-        selectionRef.current = { active: false, startX: 0, startY: 0, endX: 0, endY: 0 };
-        cleanup();
-        return;
-      }
-
-      // TAP on a node (not dragged) — SELECT it!
-      if (tapNodeId && !isDragging) {
-        const hitNode = nodesRef.current.find(n => n.id === tapNodeId);
-        if (hitNode) {
-          try {
-            handleNodeClickRef.current(hitNode);
-          } catch (err) {
-            console.error('[MindFlow] handleNodeClick error:', err);
-          }
-        }
-      } else if (!tapNodeId && !isDragging && panRef.current.active) {
-        // Tapped on empty space — deselect
-        setSelectedNode(null);
-        setSelectedNodeIds(new Set());
-        setProjectPanelNode(null);
-      }
-
-      cleanup();
-    }
-
-    function cleanup() {
-      dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
-      panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
-      isDragging = false;
-      tapNodeId = null;
-    }
 
     function onWheel(e: WheelEvent) {
       e.preventDefault();
@@ -1773,43 +1795,17 @@ export default function MindFlowBrain() {
       vp.scale = newScale;
     }
 
-    function onDblClick(e: MouseEvent) {
-      const rect = canvas!.getBoundingClientRect();
-      const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-      const hit = findNodeAt(sx, sy);
-      if (hit) {
-        if (hit.hasChildren || hit.childrenData?.length) {
-          expandNodeRef.current(hit.id);
-        } else {
-          feedBrainRef.current(hit.id);
-        }
-      } else {
-        setAddDialogOpen(true);
-      }
-    }
-
-    // Touch prevention handlers (stored so we can remove them on cleanup)
     const preventTouch = (e: TouchEvent) => { e.preventDefault(); };
 
-    canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
-    canvas.addEventListener('pointermove', onPointerMove, { passive: false });
-    canvas.addEventListener('pointerup', onPointerUp);
-    canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
-    canvas.addEventListener('dblclick', onDblClick);
     canvas.addEventListener('touchstart', preventTouch, { passive: false });
     canvas.addEventListener('touchmove', preventTouch, { passive: false });
     return () => {
-      canvas.removeEventListener('pointerdown', onPointerDown);
-      canvas.removeEventListener('pointermove', onPointerMove);
-      canvas.removeEventListener('pointerup', onPointerUp);
-      canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
-      canvas.removeEventListener('dblclick', onDblClick);
       canvas.removeEventListener('touchstart', preventTouch);
       canvas.removeEventListener('touchmove', preventTouch);
     };
-  }, [findNodeAt]); // ONLY findNodeAt as dependency — handlers accessed via refs
+  }, []);
 
   // ─── Minimap Click ─────────────────────────────────────
   const onMinimapClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1853,7 +1849,15 @@ export default function MindFlowBrain() {
   return (
     <div ref={containerRef} className="relative w-screen h-screen overflow-hidden" style={{ background: theme === 'dark' ? '#050508' : '#f0f0f5' }}>
       {/* Canvas */}
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ touchAction: 'none', cursor: 'pointer' }} />
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full"
+        style={{ touchAction: 'none', cursor: 'pointer' }}
+        onPointerDown={onCanvasPointerDown}
+        onPointerMove={onCanvasPointerMove}
+        onPointerUp={onCanvasPointerUp}
+        onPointerCancel={onCanvasPointerUp}
+        onClick={onCanvasClick}
+        onDoubleClick={onCanvasDblClick}
+      />
 
       {/* ─── Top Bar ──────────────────────────────────── */}
       <div className="absolute top-0 left-0 right-0 z-20 flex items-center gap-2 px-3 py-2 flex-wrap" style={{ background: theme === 'dark' ? 'rgba(5,5,8,0.85)' : 'rgba(240,240,245,0.9)', backdropFilter: 'blur(10px)', borderBottom: theme === 'dark' ? '1px solid rgba(255,255,255,0.06)' : '1px solid rgba(0,0,0,0.08)' }}>
