@@ -158,7 +158,7 @@ function saveState(stats: BrainStats, customNodes: MindNode[], exploredTopics: s
 }
 
 // ─── Project Panel Component ──────────────────────────────
-function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExecuteTask, onNavigate, onSelectNode, onClosePanel, onFeed, onDelete }: {
+function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExecuteTask, onNavigate, onSelectNode, onClosePanel, onFeed, onDelete, onGenerateCode, onGeneratePreview, onGenerateReport }: {
   projectNode: MindNode;
   nodes: MindNode[];
   theme: ThemeMode;
@@ -170,6 +170,9 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
   onClosePanel: () => void;
   onFeed: (nodeId: string) => void;
   onDelete: (nodeId: string) => void;
+  onGenerateCode: (projectNode: MindNode) => void;
+  onGeneratePreview: (projectNode: MindNode) => void;
+  onGenerateReport: (projectNode: MindNode) => void;
 }) {
   // Get live project node from state (not stale from when panel was opened)
   const liveProject = nodes.find(n => n.id === projectNode.id) || projectNode;
@@ -227,7 +230,11 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
           ))}
         </div>
       )}
-      <div className="flex gap-1 mt-3 pt-2 border-t border-white/10">
+      <div className="flex gap-1 mt-3 pt-2 border-t border-white/10 flex-wrap">
+        <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGenerateCode(liveProject)}>🔧 كود</Button>
+        <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGeneratePreview(liveProject)}>🌐 معاينة</Button>
+        <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onGenerateReport(liveProject)}>📄 تقرير</Button>
+        <div className="flex-1" />
         <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => onFeed(liveProject.id)}>🍎 غذّ</Button>
         <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-400" onClick={() => { onDelete(liveProject.id); onClose(); }}>🗑️ حذف</Button>
       </div>
@@ -343,6 +350,30 @@ export default function MindFlowBrain() {
   // 🏆 Achievements
   const [unlockedAchievements, setUnlockedAchievements] = useState<string[]>([]);
   const [achievementToast, setAchievementToast] = useState<Achievement | null>(null);
+
+  // 🔧 Code Generator
+  const [codeDialogOpen, setCodeDialogOpen] = useState(false);
+  const [codeLoading, setCodeLoading] = useState(false);
+  const [codeFiles, setCodeFiles] = useState<{ path: string; content: string }[]>([]);
+  const [selectedCodeFile, setSelectedCodeFile] = useState<string | null>(null);
+
+  // 🌐 Live Preview
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState('');
+
+  // 📄 Project Report
+  const [reportDialogOpen, setReportDialogOpen] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportData, setReportData] = useState<{
+    executiveSummary?: string;
+    requirements?: string[];
+    techStack?: string[];
+    architecture?: string;
+    timeline?: string;
+    risks?: string[];
+    recommendations?: string[];
+  } | null>(null);
 
   // 🖱️ Click feedback — shows a brief pulse when a node is clicked
   const [clickFeedback, setClickFeedback] = useState<{ x: number; y: number; label: string } | null>(null);
@@ -1110,6 +1141,109 @@ export default function MindFlowBrain() {
     } catch { /* */ }
     setTaskExecuting(null);
   }, [feedBrain, addTimeline]);
+
+  // ─── 🔧 Code Generator ─────────────────────────────────
+  const generateProjectCode = useCallback(async (projectNode: MindNode) => {
+    setCodeLoading(true);
+    setCodeDialogOpen(true);
+    setCodeFiles([]);
+    setSelectedCodeFile(null);
+    try {
+      // Gather project context: idea, phases, tasks
+      const idea = projectNode.summary || projectNode.label;
+      const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
+      const phases = phaseNodes.map(pn => {
+        const taskNodes = nodesRef.current.filter(n => n.parentId === pn.id);
+        return {
+          name: pn.label,
+          description: pn.summary || '',
+          tasks: taskNodes.map(tn => ({ label: tn.label, description: tn.summary || '' })),
+        };
+      });
+      // Also include flat tasks from the project node
+      const flatTasks = projectNode.projectTasks || [];
+
+      const res = await fetch('/api/brain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'generate-code', idea, phases, tasks: flatTasks }),
+      });
+      const data = await res.json();
+      if (data.files?.length) {
+        setCodeFiles(data.files);
+        setSelectedCodeFile(data.files[0].path);
+      }
+    } catch {
+      setCodeFiles([]);
+    }
+    setCodeLoading(false);
+  }, []);
+
+  // ─── 🌐 Live Preview ───────────────────────────────────
+  const generateProjectPreview = useCallback(async (projectNode: MindNode) => {
+    setPreviewLoading(true);
+    setPreviewOpen(true);
+    setPreviewHtml('');
+    try {
+      const idea = projectNode.summary || projectNode.label;
+      const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
+      const phases = phaseNodes.map(pn => {
+        const taskNodes = nodesRef.current.filter(n => n.parentId === pn.id);
+        return {
+          name: pn.label,
+          description: pn.summary || '',
+          tasks: taskNodes.map(tn => ({ label: tn.label, description: tn.summary || '' })),
+        };
+      });
+      const flatTasks = projectNode.projectTasks || [];
+
+      const res = await fetch('/api/brain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'generate-preview', idea, phases, tasks: flatTasks }),
+      });
+      const data = await res.json();
+      if (data.html) {
+        setPreviewHtml(data.html);
+      }
+    } catch {
+      setPreviewHtml('');
+    }
+    setPreviewLoading(false);
+  }, []);
+
+  // ─── 📄 Project Report ─────────────────────────────────
+  const generateProjectReport = useCallback(async (projectNode: MindNode) => {
+    setReportLoading(true);
+    setReportDialogOpen(true);
+    setReportData(null);
+    try {
+      const idea = projectNode.summary || projectNode.label;
+      const phaseNodes = nodesRef.current.filter(n => n.parentId === projectNode.id);
+      const phases = phaseNodes.map(pn => {
+        const taskNodes = nodesRef.current.filter(n => n.parentId === pn.id);
+        return {
+          name: pn.label,
+          description: pn.summary || '',
+          tasks: taskNodes.map(tn => ({ label: tn.label, description: tn.summary || '' })),
+        };
+      });
+      const flatTasks = projectNode.projectTasks || [];
+
+      const res = await fetch('/api/brain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'generate-report', idea, phases, tasks: flatTasks }),
+      });
+      const data = await res.json();
+      if (data.report) {
+        setReportData(data.report);
+      }
+    } catch {
+      setReportData(null);
+    }
+    setReportLoading(false);
+  }, []);
 
   // ─── 🧠 Auto-Learn ────────────────────────────────────
   const autoLearn = useCallback(async () => {
@@ -2158,6 +2292,9 @@ export default function MindFlowBrain() {
           onClosePanel={() => setProjectPanelNode(null)}
           onFeed={feedBrain}
           onDelete={deleteNode}
+          onGenerateCode={generateProjectCode}
+          onGeneratePreview={generateProjectPreview}
+          onGenerateReport={generateProjectReport}
         />
       )}
 
@@ -2253,6 +2390,207 @@ export default function MindFlowBrain() {
             </Button>
             {ideaLoading && <p className="text-xs text-center animate-pulse opacity-70">⏳ جاري التحليل... قد يستغرق بضع ثوان</p>}
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── 🔧 Code Viewer Dialog ──────────────────────── */}
+      <Dialog open={codeDialogOpen} onOpenChange={setCodeDialogOpen}>
+        <DialogContent aria-describedby={undefined} className={`${theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''} pointer-events-auto max-w-4xl max-h-[85vh]`}>
+          <DialogHeader><DialogTitle>🔧 مولّد الكود - Next.js</DialogTitle></DialogHeader>
+          {codeLoading ? (
+            <div className="text-center py-8 animate-pulse text-sm">⏳ جاري توليد الكود... قد يستغرق بضع ثوان</div>
+          ) : codeFiles.length > 0 ? (
+            <div className="flex gap-3 h-[60vh]">
+              {/* File tree */}
+              <div className={`w-56 shrink-0 rounded-lg border p-2 overflow-y-auto ${theme === 'dark' ? 'bg-gray-800/50 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
+                <p className="text-[10px] font-bold opacity-50 mb-2">📂 الملفات ({codeFiles.length})</p>
+                {codeFiles.map(f => (
+                  <button key={f.path} className={`w-full text-right px-2 py-1.5 rounded text-xs transition-colors mb-0.5 ${selectedCodeFile === f.path ? (theme === 'dark' ? 'bg-cyan-900/40 text-cyan-400' : 'bg-cyan-100 text-cyan-700') : (theme === 'dark' ? 'hover:bg-white/5 text-gray-300' : 'hover:bg-gray-100 text-gray-700')}`}
+                    onClick={() => setSelectedCodeFile(f.path)}>
+                    {f.path.endsWith('.tsx') || f.path.endsWith('.ts') ? '📘' : f.path.endsWith('.json') ? '📋' : f.path.endsWith('.css') ? '🎨' : '📄'} {f.path}
+                  </button>
+                ))}
+              </div>
+              {/* Code view */}
+              <div className="flex-1 overflow-hidden flex flex-col">
+                {selectedCodeFile && (() => {
+                  const file = codeFiles.find(f => f.path === selectedCodeFile);
+                  if (!file) return null;
+                  return (
+                    <div className="flex-1 flex flex-col overflow-hidden">
+                      <div className={`flex items-center justify-between px-3 py-1.5 rounded-t-lg text-xs ${theme === 'dark' ? 'bg-gray-800 text-gray-400' : 'bg-gray-100 text-gray-500'}`}>
+                        <span className="font-mono">{file.path}</span>
+                        <Button size="sm" variant="ghost" className="h-5 text-[10px] px-2" onClick={() => { navigator.clipboard.writeText(file.content); }}>📋 نسخ</Button>
+                      </div>
+                      <pre className={`flex-1 overflow-auto p-3 rounded-b-lg text-xs font-mono direction-ltr ${theme === 'dark' ? 'bg-gray-950 text-green-400' : 'bg-gray-900 text-green-400'}`} dir="ltr" style={{ lineHeight: '1.6' }}>
+                        {file.content}
+                      </pre>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-4 text-xs opacity-50">لم يتم توليد كود بعد</div>
+          )}
+          {codeFiles.length > 0 && (
+            <div className="flex gap-2 justify-end">
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
+                const allCode = codeFiles.map(f => `\n${'='.repeat(60)}\n📄 ${f.path}\n${'='.repeat(60)}\n\n${f.content}`).join('\n\n');
+                const blob = new Blob([allCode], { type: 'text/plain;charset=utf-8' });
+                const link = document.createElement('a');
+                link.download = `project-code-${Date.now()}.txt`;
+                link.href = URL.createObjectURL(blob);
+                link.click();
+                URL.revokeObjectURL(link.href);
+              }}>💾 تحميل الكل</Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── 🌐 Live Preview Dialog ─────────────────────── */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent aria-describedby={undefined} className={`${theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''} pointer-events-auto max-w-5xl max-h-[90vh]`}>
+          <DialogHeader><DialogTitle>🌐 معاينة المشروع</DialogTitle></DialogHeader>
+          {previewLoading ? (
+            <div className="text-center py-8 animate-pulse text-sm">⏳ جاري توليد المعاينة... قد يستغرق بضع ثوان</div>
+          ) : previewHtml ? (
+            <div className="flex flex-col gap-2">
+              <iframe
+                srcDoc={previewHtml}
+                className="w-full rounded-lg border bg-white"
+                style={{ height: '60vh', border: theme === 'dark' ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.1)' }}
+                title="معاينة المشروع"
+                sandbox="allow-scripts"
+              />
+              <div className="flex gap-2 justify-end">
+                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
+                  const win = window.open('', '_blank');
+                  if (win) {
+                    win.document.write(previewHtml);
+                    win.document.close();
+                  }
+                }}>🔗 فتح في نافذة جديدة</Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
+                  const blob = new Blob([previewHtml], { type: 'text/html;charset=utf-8' });
+                  const link = document.createElement('a');
+                  link.download = `project-preview-${Date.now()}.html`;
+                  link.href = URL.createObjectURL(blob);
+                  link.click();
+                  URL.revokeObjectURL(link.href);
+                }}>💾 تحميل HTML</Button>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-4 text-xs opacity-50">لم يتم توليد معاينة بعد</div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── 📄 Project Report Dialog ───────────────────── */}
+      <Dialog open={reportDialogOpen} onOpenChange={setReportDialogOpen}>
+        <DialogContent aria-describedby={undefined} className={`${theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''} pointer-events-auto max-w-3xl max-h-[85vh]`}>
+          <DialogHeader><DialogTitle>📄 تقرير المشروع</DialogTitle></DialogHeader>
+          {reportLoading ? (
+            <div className="text-center py-8 animate-pulse text-sm">⏳ جاري توليد التقرير... قد يستغرق بضع ثوان</div>
+          ) : reportData ? (
+            <div className="space-y-4 max-h-[65vh] overflow-y-auto" dir="rtl">
+              {/* Executive Summary */}
+              {reportData.executiveSummary && (
+                <div className={`p-3 rounded-lg ${theme === 'dark' ? 'bg-blue-900/20 border border-blue-800/30' : 'bg-blue-50 border border-blue-200'}`}>
+                  <h4 className="text-sm font-bold mb-1">📋 الملخص التنفيذي</h4>
+                  <p className="text-xs leading-relaxed">{reportData.executiveSummary}</p>
+                </div>
+              )}
+              {/* Requirements */}
+              {Array.isArray(reportData.requirements) && reportData.requirements.length > 0 && (
+                <div className={`p-3 rounded-lg ${theme === 'dark' ? 'bg-green-900/20 border border-green-800/30' : 'bg-green-50 border border-green-200'}`}>
+                  <h4 className="text-sm font-bold mb-2">✅ المتطلبات</h4>
+                  <ul className="space-y-1">
+                    {reportData.requirements.map((r: string, i: number) => (
+                      <li key={i} className="text-xs flex items-start gap-2"><span className="text-green-400 mt-0.5">●</span> {r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {/* Tech Stack */}
+              {Array.isArray(reportData.techStack) && reportData.techStack.length > 0 && (
+                <div className={`p-3 rounded-lg ${theme === 'dark' ? 'bg-purple-900/20 border border-purple-800/30' : 'bg-purple-50 border border-purple-200'}`}>
+                  <h4 className="text-sm font-bold mb-2">🛠️ التقنيات</h4>
+                  <div className="flex flex-wrap gap-1.5">
+                    {reportData.techStack.map((t: string, i: number) => (
+                      <Badge key={i} variant="outline" className="text-[10px]">{t}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Architecture */}
+              {reportData.architecture && (
+                <div className={`p-3 rounded-lg ${theme === 'dark' ? 'bg-yellow-900/20 border border-yellow-800/30' : 'bg-yellow-50 border border-yellow-200'}`}>
+                  <h4 className="text-sm font-bold mb-1">🏗️ البنية التقنية</h4>
+                  <p className="text-xs leading-relaxed">{reportData.architecture}</p>
+                </div>
+              )}
+              {/* Timeline */}
+              {reportData.timeline && (
+                <div className={`p-3 rounded-lg ${theme === 'dark' ? 'bg-cyan-900/20 border border-cyan-800/30' : 'bg-cyan-50 border border-cyan-200'}`}>
+                  <h4 className="text-sm font-bold mb-1">📅 الجدول الزمني</h4>
+                  <p className="text-xs leading-relaxed">{reportData.timeline}</p>
+                </div>
+              )}
+              {/* Risks */}
+              {Array.isArray(reportData.risks) && reportData.risks.length > 0 && (
+                <div className={`p-3 rounded-lg ${theme === 'dark' ? 'bg-red-900/20 border border-red-800/30' : 'bg-red-50 border border-red-200'}`}>
+                  <h4 className="text-sm font-bold mb-2">⚠️ المخاطر</h4>
+                  <ul className="space-y-1">
+                    {reportData.risks.map((r: string, i: number) => (
+                      <li key={i} className="text-xs flex items-start gap-2"><span className="text-red-400 mt-0.5">●</span> {r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {/* Recommendations */}
+              {Array.isArray(reportData.recommendations) && reportData.recommendations.length > 0 && (
+                <div className={`p-3 rounded-lg ${theme === 'dark' ? 'bg-emerald-900/20 border border-emerald-800/30' : 'bg-emerald-50 border border-emerald-200'}`}>
+                  <h4 className="text-sm font-bold mb-2">💡 التوصيات</h4>
+                  <ul className="space-y-1">
+                    {reportData.recommendations.map((r: string, i: number) => (
+                      <li key={i} className="text-xs flex items-start gap-2"><span className="text-emerald-400 mt-0.5">●</span> {r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-center py-4 text-xs opacity-50">لم يتم توليد تقرير بعد</div>
+          )}
+          {reportData && (
+            <div className="flex gap-2 justify-end">
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
+                const text = Object.entries(reportData).map(([key, value]) => {
+                  const label: Record<string, string> = {
+                    executiveSummary: 'الملخص التنفيذي',
+                    requirements: 'المتطلبات',
+                    techStack: 'التقنيات',
+                    architecture: 'البنية التقنية',
+                    timeline: 'الجدول الزمني',
+                    risks: 'المخاطر',
+                    recommendations: 'التوصيات',
+                  };
+                  const heading = label[key] || key;
+                  if (Array.isArray(value)) return `${heading}:\n${(value as string[]).map(v => `  • ${v}`).join('\n')}`;
+                  return `${heading}:\n${value}`;
+                }).join('\n\n');
+                const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+                const link = document.createElement('a');
+                link.download = `project-report-${Date.now()}.txt`;
+                link.href = URL.createObjectURL(blob);
+                link.click();
+                URL.revokeObjectURL(link.href);
+              }}>💾 تحميل التقرير</Button>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
