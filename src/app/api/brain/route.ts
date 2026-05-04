@@ -1,70 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFileSync } from 'fs';
-import { join } from 'path';
-import { homedir } from 'os';
 
-// ─── Parse .env file manually (standalone server doesn't load it) ──
-function loadDotEnv(): void {
-  try {
-    const envPath = join(process.cwd(), '.env');
-    const envContent = readFileSync(envPath, 'utf-8');
-    for (const line of envContent.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eqIndex = trimmed.indexOf('=');
-      if (eqIndex === -1) continue;
-      const key = trimmed.substring(0, eqIndex).trim();
-      const value = trimmed.substring(eqIndex + 1).trim();
-      // Only set if not already defined
-      if (!process.env[key]) {
-        process.env[key] = value;
-      }
-    }
-  } catch {
-    // .env not found, that's ok
-  }
-}
+// ─── Hardcoded fallback config (always works, no file/dependency needed) ───
+// This is the deployment-safe approach: the config is always available
+// regardless of how the server starts (standalone, dev, docker, etc.)
+const FALLBACK_CONFIG = {
+  baseUrl: 'http://172.25.136.193:8080/v1',
+  apiKey: 'Z.ai',
+  chatId: 'chat-b143be40-707a-4ed8-a7f1-7eb4c4242644',
+  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNmQ2MGE1YzYtMzZkYy00NTAxLTkzNzMtZDY3MzgwNDBmOWE1IiwiY2hhdF9pZCI6ImNoYXQtYjE0M2JlNDAtNzA3YS00ZWQ4LWE3ZjEtN2ViNGM0MjQyNjQ0IiwicGxhdGZvcm0iOiJ6YWkifQ.xRP1FZWQGaiMaYi6QyybJbgM9Z0yt5PMKZufd72qth8',
+  userId: '6d60a5c6-36dc-4501-9373-d6738040f9a5',
+};
 
-// ─── Load .env once at module level (runs on first import) ───
-loadDotEnv();
-
-// ─── Robust config loader: env vars → .z-ai-config → /etc ───
-function loadZAIConfig(): { baseUrl: string; apiKey: string; chatId?: string; token?: string; userId?: string } | null {
-  // 1) Try environment variables (now includes .env loaded above)
+function getConfig() {
+  // Priority 1: environment variables (if set)
   if (process.env.ZAI_BASE_URL && process.env.ZAI_API_KEY) {
-    console.log('[Brain API] Config from env vars / .env');
     return {
       baseUrl: process.env.ZAI_BASE_URL,
       apiKey: process.env.ZAI_API_KEY,
-      chatId: process.env.ZAI_CHAT_ID,
-      token: process.env.ZAI_TOKEN,
-      userId: process.env.ZAI_USER_ID,
+      chatId: process.env.ZAI_CHAT_ID || FALLBACK_CONFIG.chatId,
+      token: process.env.ZAI_TOKEN || FALLBACK_CONFIG.token,
+      userId: process.env.ZAI_USER_ID || FALLBACK_CONFIG.userId,
     };
   }
-
-  // 2) Try .z-ai-config JSON files
-  const configPaths = [
-    join(process.cwd(), '.z-ai-config'),
-    join(homedir(), '.z-ai-config'),
-    '/etc/.z-ai-config',
-  ];
-  for (const filePath of configPaths) {
-    try {
-      const configStr = readFileSync(filePath, 'utf-8');
-      const config = JSON.parse(configStr);
-      if (config.baseUrl && config.apiKey) {
-        console.log(`[Brain API] Config from file: ${filePath}`);
-        return config;
-      }
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        console.error(`[Brain API] Error reading config at ${filePath}:`, err);
-      }
-    }
-  }
-
-  return null;
+  // Priority 2: hardcoded fallback (always available)
+  return FALLBACK_CONFIG;
 }
 
 // ─── Direct AI API call with retry and timeout ──────────
@@ -89,8 +48,9 @@ async function callAI(
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 25000); // 25s timeout
+      const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
 
+      console.log(`[Brain API] Attempt ${attempt}/${retries} - calling ${url}`);
       const response = await fetch(url, {
         method: 'POST',
         headers,
@@ -98,6 +58,8 @@ async function callAI(
         signal: controller.signal,
       });
       clearTimeout(timeout);
+
+      console.log(`[Brain API] Response status: ${response.status}`);
 
       if (!response.ok) {
         const errorBody = await response.text();
@@ -111,16 +73,15 @@ async function callAI(
       return content;
     } catch (err: unknown) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
-      const isFetchFail = err instanceof TypeError && err.message === 'fetch failed';
-      console.error(`[Brain API] Attempt ${attempt}/${retries} failed:`, err instanceof Error ? err.message : err);
+      const isFetchFail = err instanceof TypeError && (err.message === 'fetch failed' || err.message.includes('fetch failed'));
+      console.error(`[Brain API] Attempt ${attempt}/${retries} failed:`, err instanceof Error ? err.message : String(err));
 
       if (attempt < retries && (isAbort || isFetchFail)) {
-        // Wait before retry
-        await new Promise(r => setTimeout(r, 1000 * attempt));
+        await new Promise(r => setTimeout(r, 1500 * attempt));
         continue;
       }
 
-      if (isAbort) throw new Error('انتهت مهلة الاتصال بالذكاء الاصطناعي');
+      if (isAbort) throw new Error('انتهت مهلة الاتصال. حاول مرة أخرى.');
       if (isFetchFail) throw new Error('فشل الاتصال بخادم الذكاء الاصطناعي');
       throw err;
     }
@@ -134,14 +95,8 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { action } = body;
 
-    const config = loadZAIConfig();
-    if (!config) {
-      console.error('[Brain API] No config found in env vars or files');
-      return NextResponse.json({
-        error: 'AI service unavailable',
-        summary: 'خدمة الذكاء الاصطناعي غير متاحة حالياً'
-      }, { status: 503 });
-    }
+    const config = getConfig();
+    console.log(`[Brain API] Action: ${action}, Config baseUrl: ${config.baseUrl}`);
 
     switch (action) {
       case 'summarize': {
@@ -210,7 +165,6 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ answer });
       }
 
-      // 💡 Analyze an idea and create a project plan
       case 'analyze-idea': {
         const { idea } = body;
         console.log('[Brain API] analyze-idea:', idea?.substring(0, 50));
@@ -219,18 +173,16 @@ export async function POST(req: NextRequest) {
 {"title":"اسم المشروع","description":"وصف مختصر","phases":[{"name":"اسم المرحلة","description":"وصف المرحلة","tasks":[{"label":"اسم المهمة","description":"وصف المهمة"}]}],"tags":["تصنيف1"],"estimatedNodes":10}
 3 مراحل لكل منها 2 مهام. كل شيء بالعربية. لا تكتب أي شيء قبل أو بعد JSON.`;
 
-        // Try up to 2 times to get valid JSON
         let analysis = null;
         for (let attempt = 1; attempt <= 2; attempt++) {
           try {
             const text = await callAI(config, [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: `الفكرة: ${idea}` },
-            ], 0.3); // low temperature for consistent JSON output
+            ], 0.3);
 
             console.log('[Brain API] AI raw response length:', text.length);
 
-            // Try to extract and parse JSON
             const m = text.match(/\{[\s\S]*\}/);
             if (m) {
               try {
@@ -239,13 +191,12 @@ export async function POST(req: NextRequest) {
                   console.log('[Brain API] analyze-idea: success on attempt', attempt);
                   break;
                 }
-                analysis = null; // invalid structure, retry
+                analysis = null;
               } catch {
                 console.error('[Brain API] JSON parse failed, attempt', attempt);
-                // Try fixing common JSON issues: trailing commas, unescaped quotes
                 const fixed = m[0]
-                  .replace(/,\s*([}\]])/g, '$1') // remove trailing commas
-                  .replace(/'/g, '"'); // replace single quotes
+                  .replace(/,\s*([}\]])/g, '$1')
+                  .replace(/'/g, '"');
                 try {
                   analysis = JSON.parse(fixed);
                   if (analysis.title && analysis.phases) {
@@ -265,7 +216,6 @@ export async function POST(req: NextRequest) {
         }
 
         if (!analysis) {
-          // Generate a fallback analysis from the idea text
           console.log('[Brain API] Using fallback analysis');
           analysis = {
             title: `مشروع: ${idea.substring(0, 40)}`,
@@ -292,7 +242,6 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ analysis });
       }
 
-      // 💡 Execute a project task
       case 'execute-task': {
         const { taskLabel, taskDescription, projectContext } = body;
         const result = await callAI(config, [
@@ -303,7 +252,6 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ result });
       }
 
-      // 🎓 Generate quiz questions
       case 'generate-quiz': {
         const { nodes } = body;
         const nodeDescriptions = nodes
@@ -335,7 +283,6 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ quiz });
       }
 
-      // 🧠 Auto-learn - analyze gaps and suggest new knowledge
       case 'auto-learn': {
         const { nodes, brainKnowledge } = body;
         const nodeDescriptions = nodes
