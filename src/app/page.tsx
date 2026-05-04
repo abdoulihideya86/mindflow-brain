@@ -10,7 +10,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog';
 import {
   KNOWLEDGE_BASE,
@@ -18,9 +17,13 @@ import {
   getBrainLevel,
   CROSS_LINK_RULES,
 } from '@/lib/mindflow/knowledge';
-import { sounds, toggleMute, isMuted } from '@/lib/mindflow/sounds';
-import { MATURITY_LEVELS } from '@/lib/mindflow/types';
-import type { MindNode, MindEdge, BrainStats, TimelineEntry, ViewMode, FilterState, AIInsight } from '@/lib/mindflow/types';
+import { sounds, toggleMute, isMuted, setMuted as setMutedGlobal } from '@/lib/mindflow/sounds';
+import { MATURITY_LEVELS, ACHIEVEMENTS } from '@/lib/mindflow/types';
+import type {
+  MindNode, MindEdge, BrainStats, TimelineEntry, ViewMode,
+  FilterState, AIInsight, FeedParticle, QuizQuestion, AutoLearnResult,
+  ProjectAnalysis, ProjectTask, ThemeMode, Achievement,
+} from '@/lib/mindflow/types';
 
 // ─── Utility ────────────────────────────────────────────────
 let _nid = 0;
@@ -28,7 +31,7 @@ function nid() { return `n${++_nid}_${Date.now()}`; }
 function eid() { return `e${Date.now()}_${Math.random().toString(36).slice(2, 7)}`; }
 
 const BRAIN_ID = '__brain__';
-const STORAGE_KEY = 'mindflow_brain_state_v2';
+const STORAGE_KEY = 'mindflow_brain_state_v3';
 
 function createBrainNode(cx: number, cy: number): MindNode {
   return {
@@ -40,11 +43,19 @@ function createBrainNode(cx: number, cy: number): MindNode {
     maturity: 'ancient', dormant: false, lastFedAt: Date.now(), visitCount: 99,
     alliedWith: [], aiSummary: '', aiQuestions: [], aiSuggestedLinks: [],
     feedParticles: [],
+    isProject: false, projectPhase: 'idea', projectProgress: 0, projectTasks: [],
+    quizQuestion: undefined, quizOptions: undefined, quizCorrectIndex: undefined,
+    enterAnim: 1, selected: false,
   };
 }
 
 function defaultStats(): BrainStats {
-  return { totalKnowledge: 0, totalNodes: 1, totalConnections: 0, totalFeeds: 0, topicsExplored: [], growthRate: 0, level: 1, levelName: 'بذرة', history: [] };
+  return {
+    totalKnowledge: 0, totalNodes: 1, totalConnections: 0, totalFeeds: 0,
+    topicsExplored: [], growthRate: 0, level: 1, levelName: 'بذرة', history: [],
+    quizCorrect: 0, quizTotal: 0, streak: 0, lastActiveDate: new Date().toISOString().slice(0, 10),
+    projectsCreated: 0, projectsCompleted: 0, tasksCompleted: 0,
+  };
 }
 
 function getMaturity(visits: number): MindNode['maturity'] {
@@ -54,12 +65,23 @@ function getMaturity(visits: number): MindNode['maturity'] {
   return 'seed';
 }
 
-function getMaturityEmoji(m: MindNode['maturity']) {
-  return MATURITY_LEVELS[m].emoji;
-}
+function getMaturityEmoji(m: MindNode['maturity']) { return MATURITY_LEVELS[m].emoji; }
+function getMaturityColor(m: MindNode['maturity']) { return MATURITY_LEVELS[m].color; }
 
-function getMaturityColor(m: MindNode['maturity']) {
-  return MATURITY_LEVELS[m].color;
+function makeNode(overrides: Partial<MindNode> & { id: string; label: string; x: number; y: number }): MindNode {
+  return {
+    tag: 'مخصص', summary: '', depth: 1, parentId: null,
+    isBrain: false, isCustom: false, expanded: false, hasChildren: false,
+    connections: [], knowledgeLevel: 0, color: '#00ffe0', pulsePhase: Math.random() * Math.PI * 2,
+    maturity: 'seed', dormant: false, lastFedAt: Date.now(), visitCount: 0,
+    alliedWith: [], aiSummary: '', aiQuestions: [], aiSuggestedLinks: [],
+    feedParticles: [],
+    isProject: false, projectPhase: 'idea', projectProgress: 0, projectTasks: [],
+    quizQuestion: undefined, quizOptions: undefined, quizCorrectIndex: undefined,
+    enterAnim: 0, selected: false,
+    childrenData: undefined,
+    ...overrides,
+  };
 }
 
 // ─── Persistence ────────────────────────────────────────────
@@ -67,29 +89,39 @@ interface PersistedState {
   brainStats: BrainStats;
   customNodes: { label: string; tag: string; summary: string }[];
   exploredTopics: string[];
+  unlockedAchievements: string[];
 }
 
 function loadState(): PersistedState | null {
   if (typeof window === 'undefined') return null;
-  try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch {}
+  try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch { /* */ }
   return null;
 }
 
-function saveState(stats: BrainStats, customNodes: MindNode[], exploredTopics: string[]) {
+function saveState(stats: BrainStats, customNodes: MindNode[], exploredTopics: string[], unlockedAch: string[]) {
   if (typeof window === 'undefined') return;
   try {
     const data: PersistedState = {
       brainStats: stats,
       customNodes: customNodes.filter(n => n.isCustom).map(n => ({ label: n.label, tag: n.tag, summary: n.summary })),
       exploredTopics,
+      unlockedAchievements: unlockedAch,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch {}
+  } catch { /* */ }
+}
+
+// ─── Undo/Redo ─────────────────────────────────────────────
+interface HistoryEntry {
+  nodes: MindNode[];
+  edges: MindEdge[];
+  brainStats: BrainStats;
 }
 
 // ─── Component ──────────────────────────────────────────────
 export default function MindFlowBrain() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const minimapCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const animRef = useRef<number>(0);
   const nodesRef = useRef<MindNode[]>([]);
@@ -103,12 +135,24 @@ export default function MindFlowBrain() {
   });
   const particlesRef = useRef<FeedParticle[]>([]);
   const timeRef = useRef(0);
-  const aiLoadingRef = useRef(false);
+  const cameraTargetRef = useRef<{ x: number; y: number; scale: number; animating: boolean; startTime: number; duration: number; fromX: number; fromY: number; fromScale: number }>({
+    x: 0, y: 0, scale: 1, animating: false, startTime: 0, duration: 500, fromX: 0, fromY: 0, fromScale: 1,
+  });
+
+  // Multi-select
+  const selectionRef = useRef<{ active: boolean; startX: number; startY: number; endX: number; endY: number }>({
+    active: false, startX: 0, startY: 0, endX: 0, endY: 0,
+  });
+
+  // History
+  const historyRef = useRef<HistoryEntry[]>([]);
+  const historyIndexRef = useRef(-1);
+  const skipHistoryRef = useRef(false);
 
   // ─── Lazy Initializer ──────────────────────────────────
   const getInitialState = () => {
     if (typeof window === 'undefined') {
-      return { nodes: [] as MindNode[], edges: [] as MindEdge[], stats: defaultStats(), explored: [] as string[] };
+      return { nodes: [] as MindNode[], edges: [] as MindEdge[], stats: defaultStats(), explored: [] as string[], unlockedAch: [] as string[] };
     }
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
@@ -117,26 +161,26 @@ export default function MindFlowBrain() {
     let initialNodes = [brain];
     let initialStats = defaultStats();
     let initialExplored: string[] = [];
+    let initialUnlockedAch: string[] = [];
 
     if (persisted) {
-      initialStats = persisted.brainStats;
+      initialStats = { ...defaultStats(), ...persisted.brainStats };
       initialExplored = persisted.exploredTopics;
+      initialUnlockedAch = persisted.unlockedAchievements || [];
       persisted.customNodes.forEach((cn, i) => {
         const angle = (i / Math.max(1, persisted.customNodes.length)) * Math.PI * 2 - Math.PI / 2;
         const dist = 220 + Math.random() * 80;
-        initialNodes.push({
-          id: nid(), label: cn.label, tag: cn.tag, summary: cn.summary,
+        initialNodes.push(makeNode({
+          id: nid(), label: cn.label, tag: cn.tag || 'مخصص', summary: cn.summary,
           x: cx + Math.cos(angle) * dist, y: cy + Math.sin(angle) * dist,
-          depth: 1, parentId: BRAIN_ID, isBrain: false, isCustom: true,
-          expanded: false, hasChildren: false, connections: [BRAIN_ID],
-          knowledgeLevel: 50, color: '#ff6b9d', pulsePhase: Math.random() * Math.PI * 2,
-          maturity: 'sprout', dormant: false, lastFedAt: Date.now(), visitCount: 5,
-          alliedWith: [], feedParticles: [],
-        });
+          depth: 1, parentId: BRAIN_ID, isCustom: true,
+          connections: [BRAIN_ID], knowledgeLevel: 50, color: '#ff6b9d',
+          maturity: 'sprout', visitCount: 5, enterAnim: 1,
+        }));
         initialStats.totalNodes++;
       });
     }
-    return { nodes: initialNodes, edges: [] as MindEdge[], stats: initialStats, explored: initialExplored };
+    return { nodes: initialNodes, edges: [] as MindEdge[], stats: initialStats, explored: initialExplored, unlockedAch: initialUnlockedAch };
   };
 
   const [initialData] = useState(getInitialState);
@@ -152,29 +196,63 @@ export default function MindFlowBrain() {
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
   const [exploredTopics, setExploredTopics] = useState<string[]>(initialData.explored);
   const [showStats, setShowStats] = useState(false);
-  const [feedAnim, setFeedAnim] = useState<{ from: string; to: string } | null>(null);
-  const [muted, setMuted] = useState(false);
 
-  // 🔍 Feature 2: Smart Search
+  // 🔍 Search
   const [searchQuery, setSearchQuery] = useState('');
   const [searchActive, setSearchActive] = useState(false);
   const [searchResults, setSearchResults] = useState<MindNode[]>([]);
   const [highlightedNodes, setHighlightedNodes] = useState<Set<string>>(new Set());
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // 🕸️ Feature 8: Advanced View
+  // 🕸️ View
   const [viewMode, setViewMode] = useState<ViewMode>('normal');
   const [filterState, setFilterState] = useState<FilterState>({
     topics: [], tags: [], minKnowledge: 0, maturityFilter: [], showDormant: true,
   });
   const [showFilterPanel, setShowFilterPanel] = useState(false);
-  const [timelineIndex, setTimelineIndex] = useState(-1);
 
-  // 🤖 Feature 1: AI
+  // 🎨 Theme
+  const [theme, setTheme] = useState<ThemeMode>('dark');
+
+  // 🔊 Sound
+  const [muted, setMuted] = useState(false);
+
+  // 🤖 AI
   const [aiLoading, setAiLoading] = useState(false);
   const [aiInsight, setAiInsight] = useState<AIInsight | null>(null);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiAnswer, setAiAnswer] = useState('');
+  const [learningPath, setLearningPath] = useState<string[]>([]);
+
+  // 🎓 Quiz
+  const [quizOpen, setQuizOpen] = useState(false);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [currentQuiz, setCurrentQuiz] = useState<QuizQuestion | null>(null);
+  const [quizAnswer, setQuizAnswer] = useState<number | null>(null);
+  const [quizResult, setQuizResult] = useState<'correct' | 'wrong' | null>(null);
+
+  // 💡 Idea → Project
+  const [ideaDialogOpen, setIdeaDialogOpen] = useState(false);
+  const [ideaText, setIdeaText] = useState('');
+  const [ideaLoading, setIdeaLoading] = useState(false);
+  const [projectPanelNode, setProjectPanelNode] = useState<MindNode | null>(null);
+  const [taskExecuting, setTaskExecuting] = useState<string | null>(null);
+
+  // 🧠 Auto-learn
+  const [autoLearnActive, setAutoLearnActive] = useState(false);
+  const [autoLearnLoading, setAutoLearnLoading] = useState(false);
+  const [autoLearnInsights, setAutoLearnInsights] = useState<string[]>([]);
+
+  // 🏆 Achievements
+  const [unlockedAchievements, setUnlockedAchievements] = useState<string[]>(initialData.unlockedAch);
+  const [achievementToast, setAchievementToast] = useState<Achievement | null>(null);
+
+  // Multi-select
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+
+  // Edge flow particles
+  const edgeParticlesRef = useRef<{ edgeId: string; progress: number; speed: number }[]>([]);
 
   // ─── Sync refs ─────────────────────────────────────────
   useEffect(() => { nodesRef.current = nodes; }, [nodes]);
@@ -183,8 +261,8 @@ export default function MindFlowBrain() {
   // ─── Save on changes ───────────────────────────────────
   useEffect(() => {
     if (nodes.length === 0) return;
-    saveState(brainStats, nodes, exploredTopics);
-  }, [brainStats, nodes, exploredTopics]);
+    saveState(brainStats, nodes, exploredTopics, unlockedAchievements);
+  }, [brainStats, nodes, exploredTopics, unlockedAchievements]);
 
   // ─── Canvas Resize ─────────────────────────────────────
   useEffect(() => {
@@ -197,6 +275,47 @@ export default function MindFlowBrain() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  // ─── History ───────────────────────────────────────────
+  const pushHistory = useCallback(() => {
+    if (skipHistoryRef.current) { skipHistoryRef.current = false; return; }
+    const entry: HistoryEntry = {
+      nodes: JSON.parse(JSON.stringify(nodesRef.current)),
+      edges: JSON.parse(JSON.stringify(edgesRef.current)),
+      brainStats: JSON.parse(JSON.stringify(brainStats)),
+    };
+    const newHistory = historyRef.current.slice(0, historyIndexRef.current + 1);
+    newHistory.push(entry);
+    if (newHistory.length > 50) newHistory.shift();
+    historyRef.current = newHistory;
+    historyIndexRef.current = newHistory.length - 1;
+  }, [brainStats]);
+
+  const undo = useCallback(() => {
+    if (historyIndexRef.current <= 0) return;
+    historyIndexRef.current--;
+    const entry = historyRef.current[historyIndexRef.current];
+    if (entry) {
+      skipHistoryRef.current = true;
+      setNodes(entry.nodes);
+      setEdges(entry.edges);
+      setBrainStats(entry.brainStats);
+      setSelectedNode(null);
+    }
+  }, []);
+
+  const redo = useCallback(() => {
+    if (historyIndexRef.current >= historyRef.current.length - 1) return;
+    historyIndexRef.current++;
+    const entry = historyRef.current[historyIndexRef.current];
+    if (entry) {
+      skipHistoryRef.current = true;
+      setNodes(entry.nodes);
+      setEdges(entry.edges);
+      setBrainStats(entry.brainStats);
+      setSelectedNode(null);
+    }
+  }, []);
+
   // ─── Find node at position ─────────────────────────────
   const findNodeAt = useCallback((sx: number, sy: number): MindNode | null => {
     const vp = viewportRef.current;
@@ -204,10 +323,37 @@ export default function MindFlowBrain() {
     const wy = (sy - vp.y) / vp.scale;
     for (let i = nodesRef.current.length - 1; i >= 0; i--) {
       const n = nodesRef.current[i];
-      const r = n.isBrain ? 55 : 32;
+      const r = n.isBrain ? 55 : n.isProject ? 45 : 32;
       if ((wx - n.x) ** 2 + (wy - n.y) ** 2 < r * r) return n;
     }
     return null;
+  }, []);
+
+  // ─── Smooth camera ─────────────────────────────────────
+  const navigateToNode = useCallback((nodeId: string) => {
+    const node = nodesRef.current.find(n => n.id === nodeId);
+    if (!node) return;
+    const vp = viewportRef.current;
+    cameraTargetRef.current = {
+      x: -node.x * vp.scale + window.innerWidth / 2,
+      y: -node.y * vp.scale + window.innerHeight / 2,
+      scale: vp.scale,
+      animating: true, startTime: performance.now(), duration: 500,
+      fromX: vp.x, fromY: vp.y, fromScale: vp.scale,
+    };
+  }, []);
+
+  const resetView = useCallback(() => {
+    const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
+    if (!brain) return;
+    const vp = viewportRef.current;
+    cameraTargetRef.current = {
+      x: window.innerWidth / 2 - brain.x,
+      y: window.innerHeight / 2 - brain.y,
+      scale: 1,
+      animating: true, startTime: performance.now(), duration: 400,
+      fromX: vp.x, fromY: vp.y, fromScale: vp.scale,
+    };
   }, []);
 
   // ─── Add timeline entry ────────────────────────────────
@@ -220,18 +366,29 @@ export default function MindFlowBrain() {
     }));
   }, []);
 
-  // ─── Check Dormant Nodes (🧬 Feature 9) ───────────────
+  // ─── Check Dormant Nodes ───────────────────────────────
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
       setNodes(prev => prev.map(n => {
         if (n.isBrain || n.dormant) return n;
         const timeSinceFed = now - n.lastFedAt;
-        const shouldDormant = timeSinceFed > 60000 && n.knowledgeLevel > 0; // 1 min
+        const shouldDormant = timeSinceFed > 120000 && n.knowledgeLevel > 0;
         if (shouldDormant && !n.dormant) return { ...n, dormant: true };
         return n;
       }));
     }, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ─── Entry animation ───────────────────────────────────
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNodes(prev => prev.map(n => {
+        if (n.enterAnim < 1) return { ...n, enterAnim: Math.min(1, n.enterAnim + 0.05) };
+        return n;
+      }));
+    }, 16);
     return () => clearInterval(interval);
   }, []);
 
@@ -268,12 +425,11 @@ export default function MindFlowBrain() {
   }, []);
 
   // ─── Feed Brain ────────────────────────────────────────
-  const feedBrain = useCallback((nodeId: string) => {
+  const feedBrain = useCallback((nodeId: string, multiplier = 1) => {
     const node = nodesRef.current.find(n => n.id === nodeId);
     const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
     if (!node || !brain || node.isBrain) return;
 
-    // Particles
     const newParticles: FeedParticle[] = [];
     for (let i = 0; i < 8; i++) {
       newParticles.push({
@@ -285,7 +441,8 @@ export default function MindFlowBrain() {
     }
     particlesRef.current = [...particlesRef.current, ...newParticles];
 
-    const knowledgeGain = 5 + Math.floor(Math.random() * 10);
+    const knowledgeGain = (5 + Math.floor(Math.random() * 10)) * multiplier;
+    pushHistory();
     setBrainStats(prev => {
       const newK = prev.totalKnowledge + knowledgeGain;
       const lv = getBrainLevel(newK);
@@ -301,11 +458,10 @@ export default function MindFlowBrain() {
       };
     });
 
-    // Update node maturity + knowledge
     setNodes(prev => prev.map(n => {
       if (n.id === nodeId) {
         const newVisits = n.visitCount + 1;
-        const newKnowledge = Math.min(100, n.knowledgeLevel + 10);
+        const newKnowledge = Math.min(100, n.knowledgeLevel + 10 * multiplier);
         const newMaturity = getMaturity(newVisits);
         const wasMaturity = n.maturity;
         if (newMaturity !== wasMaturity) sounds.mature();
@@ -313,10 +469,8 @@ export default function MindFlowBrain() {
           ...n,
           knowledgeLevel: newKnowledge,
           connections: n.connections.includes(BRAIN_ID) ? n.connections : [...n.connections, BRAIN_ID],
-          visitCount: newVisits,
-          maturity: newMaturity,
-          dormant: false,
-          lastFedAt: Date.now(),
+          visitCount: newVisits, maturity: newMaturity,
+          dormant: false, lastFedAt: Date.now(),
         };
       }
       return n;
@@ -329,9 +483,7 @@ export default function MindFlowBrain() {
     });
 
     sounds.feed();
-    setFeedAnim({ from: nodeId, to: BRAIN_ID });
-    setTimeout(() => setFeedAnim(null), 1500);
-  }, []);
+  }, [pushHistory]);
 
   // ─── Expand Topic ─────────────────────────────────────
   const expandTopic = useCallback((topicKey: string) => {
@@ -340,6 +492,7 @@ export default function MindFlowBrain() {
     const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
     if (!brain) return;
 
+    pushHistory();
     const newNodes: MindNode[] = [];
     const newEdges: MindEdge[] = [];
     const count = topic.children.length;
@@ -348,16 +501,13 @@ export default function MindFlowBrain() {
     topic.children.forEach((child, i) => {
       const angle = (i / count) * Math.PI * 2 - Math.PI / 2;
       const dist = 200 + Math.random() * 60;
-      const childNode: MindNode = {
+      const childNode = makeNode({
         id: nid(), label: child.label, tag: child.tag, summary: child.summary || '',
         x: brain.x + Math.cos(angle) * dist, y: brain.y + Math.sin(angle) * dist,
-        depth: 1, parentId: BRAIN_ID, isBrain: false, isCustom: false,
-        expanded: false, hasChildren: !!child.children?.length,
-        childrenData: child.children, connections: [], knowledgeLevel: 0,
-        color, pulsePhase: Math.random() * Math.PI * 2,
-        maturity: 'seed', dormant: false, lastFedAt: Date.now(), visitCount: 0,
-        alliedWith: [], feedParticles: [],
-      };
+        depth: 1, parentId: BRAIN_ID,
+        hasChildren: !!child.children?.length,
+        childrenData: child.children, color,
+      });
       newNodes.push(childNode);
       newEdges.push({ id: eid(), from: BRAIN_ID, to: childNode.id, type: 'parent', strength: 1, animated: false, createdAt: Date.now() });
     });
@@ -366,19 +516,22 @@ export default function MindFlowBrain() {
     setEdges(prev => [...prev, ...newEdges]);
     setBrainStats(prev => ({
       ...prev, totalNodes: prev.totalNodes + newNodes.length, totalConnections: prev.totalConnections + newEdges.length,
+      topicsExplored: prev.topicsExplored.includes(topicKey) ? prev.topicsExplored : [...prev.topicsExplored, topicKey],
       history: [...prev.history.slice(-100), { timestamp: Date.now(), event: 'expand', detail: `استكشاف: ${topicKey}`, knowledge: prev.totalKnowledge }],
     }));
     setExploredTopics(prev => prev.includes(topicKey) ? prev : [...prev, topicKey]);
 
     setTimeout(() => { newNodes.forEach((n, i) => { setTimeout(() => feedBrain(n.id), i * 200); }); }, 300);
     setTimeout(() => { addCrossLinks(newNodes); }, 500);
-  }, [feedBrain, addCrossLinks]);
+  }, [feedBrain, addCrossLinks, pushHistory]);
 
   // ─── Expand Sub-nodes ─────────────────────────────────
   const expandNode = useCallback((nodeId: string) => {
     const parent = nodesRef.current.find(n => n.id === nodeId);
     if (!parent || !parent.childrenData?.length) return;
+
     if (parent.expanded) {
+      pushHistory();
       setNodes(prev => {
         const toRemove = new Set(prev.filter(n => n.parentId === nodeId).map(n => n.id));
         return prev.filter(n => !toRemove.has(n.id)).map(n => n.id === nodeId ? { ...n, expanded: false } : n);
@@ -390,6 +543,7 @@ export default function MindFlowBrain() {
       return;
     }
 
+    pushHistory();
     const newNodes: MindNode[] = [];
     const newEdges: MindEdge[] = [];
     const count = parent.childrenData.length;
@@ -397,16 +551,13 @@ export default function MindFlowBrain() {
     parent.childrenData.forEach((child, i) => {
       const angle = (i / count) * Math.PI * 2 - Math.PI / 2;
       const dist = 150 + Math.random() * 40;
-      const childNode: MindNode = {
+      const childNode = makeNode({
         id: nid(), label: child.label, tag: child.tag, summary: child.summary || '',
         x: parent.x + Math.cos(angle) * dist, y: parent.y + Math.sin(angle) * dist,
-        depth: parent.depth + 1, parentId: nodeId, isBrain: false, isCustom: false,
-        expanded: false, hasChildren: !!child.children?.length,
-        childrenData: child.children, connections: [], knowledgeLevel: 0,
-        color: parent.color, pulsePhase: Math.random() * Math.PI * 2,
-        maturity: 'seed', dormant: false, lastFedAt: Date.now(), visitCount: 0,
-        alliedWith: [], feedParticles: [],
-      };
+        depth: parent.depth + 1, parentId: nodeId,
+        hasChildren: !!child.children?.length,
+        childrenData: child.children, color: parent.color,
+      });
       newNodes.push(childNode);
       newEdges.push({ id: eid(), from: nodeId, to: childNode.id, type: 'parent', strength: 0.8, animated: false, createdAt: Date.now() });
     });
@@ -415,7 +566,7 @@ export default function MindFlowBrain() {
     setEdges(prev => [...prev, ...newEdges]);
     setBrainStats(prev => ({ ...prev, totalNodes: prev.totalNodes + newNodes.length, totalConnections: prev.totalConnections + newEdges.length }));
     setTimeout(() => { newNodes.forEach((n, i) => { setTimeout(() => feedBrain(n.id), i * 150); }); }, 200);
-  }, [feedBrain]);
+  }, [feedBrain, pushHistory]);
 
   // ─── Add Custom Node ──────────────────────────────────
   const addCustomNode = useCallback(() => {
@@ -423,17 +574,16 @@ export default function MindFlowBrain() {
     const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
     if (!brain) return;
 
+    pushHistory();
     const angle = Math.random() * Math.PI * 2;
     const dist = 220 + Math.random() * 80;
-    const newNode: MindNode = {
+    const newNode = makeNode({
       id: nid(), label: newLabel.trim(), tag: newTag.trim() || 'مخصص', summary: newSummary.trim(),
       x: brain.x + Math.cos(angle) * dist, y: brain.y + Math.sin(angle) * dist,
-      depth: 1, parentId: BRAIN_ID, isBrain: false, isCustom: true,
-      expanded: false, hasChildren: false, connections: [BRAIN_ID],
-      knowledgeLevel: 50, color: '#ff6b9d', pulsePhase: Math.random() * Math.PI * 2,
-      maturity: 'sprout', dormant: false, lastFedAt: Date.now(), visitCount: 3,
-      alliedWith: [], feedParticles: [],
-    };
+      depth: 1, parentId: BRAIN_ID, isCustom: true,
+      connections: [BRAIN_ID], knowledgeLevel: 50, color: '#ff6b9d',
+      maturity: 'sprout', visitCount: 3,
+    });
 
     setNodes(prev => [...prev, newNode]);
     setEdges(prev => [...prev, { id: eid(), from: BRAIN_ID, to: newNode.id, type: 'feed', strength: 0.6, animated: true, createdAt: Date.now() }]);
@@ -446,10 +596,11 @@ export default function MindFlowBrain() {
     setAddDialogOpen(false);
     addTimeline('create', `عقدة جديدة: ${newLabel.trim()}`);
     setTimeout(() => feedBrain(newNode.id), 100);
-  }, [newLabel, newTag, newSummary, feedBrain, addTimeline]);
+  }, [newLabel, newTag, newSummary, feedBrain, addTimeline, pushHistory]);
 
   // ─── Manual Connect ────────────────────────────────────
   const connectNodes = useCallback((fromId: string, toId: string) => {
+    pushHistory();
     setEdges(prev => {
       const exists = prev.some(e => (e.from === fromId && e.to === toId) || (e.from === toId && e.to === fromId));
       if (exists) return prev;
@@ -463,42 +614,36 @@ export default function MindFlowBrain() {
     setBrainStats(prev => ({ ...prev, totalConnections: prev.totalConnections + 1, totalKnowledge: prev.totalKnowledge + 8 }));
     sounds.connect();
     addTimeline('link', 'ربط يدوي بين عقدتين');
-  }, [addTimeline]);
+  }, [addTimeline, pushHistory]);
 
   // ─── Delete Node ───────────────────────────────────────
   const deleteNode = useCallback((nodeId: string) => {
     if (nodeId === BRAIN_ID) return;
+    pushHistory();
     const toRemove = new Set<string>();
     function collect(id: string) { toRemove.add(id); nodesRef.current.filter(n => n.parentId === id).forEach(n => collect(n.id)); }
     collect(nodeId);
     setNodes(prev => prev.filter(n => !toRemove.has(n.id)));
     setEdges(prev => prev.filter(e => !toRemove.has(e.from) && !toRemove.has(e.to)));
     setSelectedNode(null);
-  }, []);
+    setSelectedNodeIds(prev => { const next = new Set(prev); toRemove.forEach(id => next.delete(id)); return next; });
+  }, [pushHistory]);
 
-  // 🔍 Feature 2: Smart Search
+  // ─── Search ────────────────────────────────────────────
   const performSearch = useCallback((query: string) => {
     if (!query.trim()) {
-      setSearchActive(false);
-      setSearchResults([]);
-      setHighlightedNodes(new Set());
+      setSearchActive(false); setSearchResults([]); setHighlightedNodes(new Set());
       return;
     }
     const q = query.toLowerCase();
     const results = nodesRef.current.filter(n =>
-      !n.isBrain && (
-        n.label.toLowerCase().includes(q) ||
-        n.tag.toLowerCase().includes(q) ||
-        n.summary.toLowerCase().includes(q)
-      )
+      !n.isBrain && (n.label.toLowerCase().includes(q) || n.tag.toLowerCase().includes(q) || n.summary.toLowerCase().includes(q))
     );
-    setSearchActive(true);
-    setSearchResults(results);
-    setHighlightedNodes(new Set(results.map(n => n.id)));
-    if (results.length > 0) sounds.searchFound();
-  }, []);
+    setSearchActive(true); setSearchResults(results); setHighlightedNodes(new Set(results.map(n => n.id)));
+    if (results.length > 0) { sounds.searchFound(); navigateToNode(results[0].id); }
+  }, [navigateToNode]);
 
-  // 🕸️ Feature 8: Filter nodes
+  // ─── Filter ────────────────────────────────────────────
   const getFilteredNodeIds = useCallback(() => {
     if (viewMode !== 'filtered') return null;
     const ids = new Set<string>();
@@ -513,29 +658,19 @@ export default function MindFlowBrain() {
     return ids;
   }, [viewMode, filterState]);
 
-  // 🤖 Feature 1: AI Functions
+  // ─── AI Functions ──────────────────────────────────────
   const aiSummarize = useCallback(async () => {
-    setAiLoading(true);
-    setAiPanelOpen(true);
+    setAiLoading(true); setAiPanelOpen(true);
     try {
       const nodeData = nodesRef.current.map(n => ({ id: n.id, label: n.label, tag: n.tag, summary: n.summary, isBrain: n.isBrain }));
       const res = await fetch('/api/brain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'summarize', nodes: nodeData, brainKnowledge: brainStats.totalKnowledge }),
       });
       const data = await res.json();
-      setAiInsight(prev => ({
-        summary: data.summary || 'لم يتم توليد ملخص',
-        questions: data.questions || [],
-        suggestedLinks: prev?.suggestedLinks || [],
-        suggestedNodes: prev?.suggestedNodes || [],
-      }));
-      sounds.aiInsight();
-      addTimeline('ai-insight', 'توليد ملخص ذكي');
-    } catch {
-      setAiInsight(prev => ({ ...prev, summary: 'خطأ في الاتصال بالذكاء الاصطناعي' }));
-    }
+      setAiInsight(prev => ({ summary: data.summary || 'لم يتم توليد ملخص', questions: data.questions || [], suggestedLinks: prev?.suggestedLinks || [], suggestedNodes: prev?.suggestedNodes || [] }));
+      sounds.aiInsight(); addTimeline('ai-insight', 'توليد ملخص ذكي');
+    } catch { setAiInsight(prev => ({ ...prev, summary: 'خطأ في الاتصال بالذكاء الاصطناعي' })); }
     setAiLoading(false);
   }, [brainStats.totalKnowledge, addTimeline]);
 
@@ -544,8 +679,7 @@ export default function MindFlowBrain() {
     try {
       const nodeData = nodesRef.current.filter(n => !n.isBrain).map(n => ({ id: n.id, label: n.label, tag: n.tag, summary: n.summary }));
       const res = await fetch('/api/brain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'suggest-links', nodes: nodeData }),
       });
       const data = await res.json();
@@ -553,58 +687,44 @@ export default function MindFlowBrain() {
         data.suggestedLinks.forEach((link: { from: string; to: string; reason: string }) => {
           const fromNode = nodesRef.current.find(n => n.id === link.from || n.label === link.from);
           const toNode = nodesRef.current.find(n => n.id === link.to || n.label === link.to);
-          if (fromNode && toNode) {
-            setEdges(prev => {
-              const exists = prev.some(e => (e.from === fromNode.id && e.to === toNode.id) || (e.from === toNode.id && e.to === fromNode.id));
-              if (!exists) return [...prev, { id: eid(), from: fromNode.id, to: toNode.id, type: 'ai-link', strength: 0.4, animated: true, createdAt: Date.now() }];
-              return prev;
-            });
-          }
+          if (fromNode && toNode) connectNodes(fromNode.id, toNode.id);
         });
-        sounds.aiInsight();
-        addTimeline('ai-insight', 'اقتراح روابط ذكية');
+        sounds.aiInsight(); addTimeline('ai-insight', 'اقتراح روابط ذكية');
       }
-    } catch {}
+    } catch { /* */ }
     setAiLoading(false);
-  }, [addTimeline]);
+  }, [addTimeline, connectNodes]);
 
   const aiGenerateNodes = useCallback(async (parentNode: MindNode) => {
     setAiLoading(true);
     try {
       const res = await fetch('/api/brain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'generate-nodes', nodeLabel: parentNode.label, nodeTag: parentNode.tag, nodeSummary: parentNode.summary }),
       });
       const data = await res.json();
       if (data.suggestedNodes?.length) {
-        const newNodes: MindNode[] = [];
-        const newEdges: MindEdge[] = [];
+        pushHistory();
+        const newNodes: MindNode[] = []; const newEdges: MindEdge[] = [];
         const count = data.suggestedNodes.length;
         data.suggestedNodes.forEach((sn: { label: string; tag: string; summary: string }, i: number) => {
           const angle = (i / count) * Math.PI * 2 - Math.PI / 2;
           const dist = 150 + Math.random() * 40;
-          newNodes.push({
+          newNodes.push(makeNode({
             id: nid(), label: sn.label, tag: sn.tag, summary: sn.summary,
             x: parentNode.x + Math.cos(angle) * dist, y: parentNode.y + Math.sin(angle) * dist,
-            depth: parentNode.depth + 1, parentId: parentNode.id, isBrain: false, isCustom: false,
-            expanded: false, hasChildren: false, connections: [], knowledgeLevel: 0,
-            color: '#a78bfa', pulsePhase: Math.random() * Math.PI * 2,
-            maturity: 'seed', dormant: false, lastFedAt: Date.now(), visitCount: 0,
-            alliedWith: [], feedParticles: [],
-          });
+            depth: parentNode.depth + 1, parentId: parentNode.id, color: '#a78bfa',
+          }));
           newEdges.push({ id: eid(), from: parentNode.id, to: newNodes[newNodes.length - 1].id, type: 'ai-link', strength: 0.6, animated: true, createdAt: Date.now() });
         });
-        setNodes(prev => [...prev, ...newNodes]);
-        setEdges(prev => [...prev, ...newEdges]);
+        setNodes(prev => [...prev, ...newNodes]); setEdges(prev => [...prev, ...newEdges]);
         setBrainStats(prev => ({ ...prev, totalNodes: prev.totalNodes + newNodes.length, totalConnections: prev.totalConnections + newEdges.length }));
-        sounds.aiInsight();
-        addTimeline('ai-insight', `AI ولّد ${newNodes.length} عقد`);
+        sounds.aiInsight(); addTimeline('ai-insight', `AI ولّد ${newNodes.length} عقد`);
         setTimeout(() => { newNodes.forEach((n, i) => { setTimeout(() => feedBrain(n.id), i * 150); }); }, 200);
       }
-    } catch {}
+    } catch { /* */ }
     setAiLoading(false);
-  }, [feedBrain, addTimeline]);
+  }, [feedBrain, addTimeline, pushHistory]);
 
   const aiAsk = useCallback(async () => {
     if (!aiQuestion.trim()) return;
@@ -612,69 +732,415 @@ export default function MindFlowBrain() {
     try {
       const nodeData = nodesRef.current.filter(n => !n.isBrain).map(n => ({ label: n.label, summary: n.summary }));
       const res = await fetch('/api/brain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'ask', nodes: nodeData, question: aiQuestion }),
       });
       const data = await res.json();
-      setAiAnswer(data.answer || 'لا إجابة');
-      sounds.aiInsight();
+      setAiAnswer(data.answer || 'لا إجابة'); sounds.aiInsight();
     } catch { setAiAnswer('خطأ في الاتصال'); }
     setAiLoading(false);
   }, [aiQuestion]);
 
-  // 🧬 Feature 9: Form Alliance
+  // ─── Alliance ──────────────────────────────────────────
   const formAlliance = useCallback((nodeId1: string, nodeId2: string) => {
+    pushHistory();
     setNodes(prev => prev.map(n => {
       if (n.id === nodeId1) return { ...n, alliedWith: [...n.alliedWith, nodeId2] };
       if (n.id === nodeId2) return { ...n, alliedWith: [...n.alliedWith, nodeId1] };
       return n;
     }));
     setEdges(prev => [...prev, { id: eid(), from: nodeId1, to: nodeId2, type: 'alliance', strength: 0.8, animated: true, createdAt: Date.now() }]);
-    sounds.alliance();
-    addTimeline('alliance', 'تحالف عقد');
-  }, [addTimeline]);
+    sounds.alliance(); addTimeline('alliance', 'تحالف عقد');
+  }, [addTimeline, pushHistory]);
 
-  // Wake dormant node
   const wakeNode = useCallback((nodeId: string) => {
     setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, dormant: false, lastFedAt: Date.now() } : n));
     feedBrain(nodeId);
   }, [feedBrain]);
 
+  // ─── 🎓 Quiz ───────────────────────────────────────────
+  const generateQuiz = useCallback(async () => {
+    setQuizLoading(true); setQuizOpen(true);
+    try {
+      const nodeData = nodesRef.current.filter(n => !n.isBrain).map(n => ({ label: n.label, tag: n.tag, summary: n.summary }));
+      const res = await fetch('/api/brain', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'generate-quiz', nodes: nodeData }),
+      });
+      const data = await res.json();
+      if (data.quiz) {
+        setCurrentQuiz({ question: data.quiz.question, options: data.quiz.options || [], correctIndex: data.quiz.correctIndex ?? 0, explanation: data.quiz.explanation || '', relatedNodeId: undefined });
+        setQuizAnswer(null); setQuizResult(null);
+      } else {
+        setCurrentQuiz({ question: 'لم يتم توليد سؤال', options: ['أ', 'ب', 'ج', 'د'], correctIndex: 0, explanation: '' });
+      }
+    } catch { setCurrentQuiz({ question: 'خطأ في الاتصال', options: ['أ', 'ب', 'ج', 'د'], correctIndex: 0, explanation: '' }); }
+    setQuizLoading(false);
+  }, []);
+
+  const answerQuiz = useCallback((optionIndex: number) => {
+    if (!currentQuiz || quizResult) return;
+    setQuizAnswer(optionIndex);
+    const isCorrect = optionIndex === currentQuiz.correctIndex;
+    setQuizResult(isCorrect ? 'correct' : 'wrong');
+    setBrainStats(prev => ({
+      ...prev,
+      quizTotal: prev.quizTotal + 1,
+      quizCorrect: isCorrect ? prev.quizCorrect + 1 : prev.quizCorrect,
+    }));
+    if (isCorrect) {
+      sounds.levelUp();
+      // 2x feed on a random node
+      const nonBrain = nodesRef.current.filter(n => !n.isBrain);
+      if (nonBrain.length > 0) {
+        const target = nonBrain[Math.floor(Math.random() * nonBrain.length)];
+        feedBrain(target.id, 2);
+      }
+    }
+    addTimeline('quiz', isCorrect ? 'إجابة صحيحة! 🎉' : 'إجابة خاطئة');
+  }, [currentQuiz, quizResult, feedBrain, addTimeline]);
+
+  // ─── 💡 Idea → Project ─────────────────────────────────
+  const analyzeIdea = useCallback(async () => {
+    if (!ideaText.trim()) return;
+    setIdeaLoading(true);
+    try {
+      const res = await fetch('/api/brain', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'analyze-idea', idea: ideaText.trim() }),
+      });
+      const data = await res.json();
+      if (data.analysis) {
+        pushHistory();
+        const analysis: ProjectAnalysis = data.analysis;
+        const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
+        if (!brain) return;
+
+        const projectAngle = Math.random() * Math.PI * 2;
+        const projectDist = 300;
+        const projectNode = makeNode({
+          id: nid(), label: `🚀 ${analysis.title}`, tag: analysis.tags?.[0] || 'مشروع',
+          summary: analysis.description,
+          x: brain.x + Math.cos(projectAngle) * projectDist,
+          y: brain.y + Math.sin(projectAngle) * projectDist,
+          depth: 1, parentId: BRAIN_ID, isCustom: true,
+          connections: [BRAIN_ID], color: '#f59e0b',
+          isProject: true, projectPhase: 'planning', projectProgress: 0,
+          projectTasks: analysis.phases.flatMap(p =>
+            p.tasks.map(t => ({ id: nid(), label: t.label, status: 'pending' as const }))
+          ),
+          knowledgeLevel: 30, maturity: 'sprout', visitCount: 3,
+        });
+
+        const newNodes = [projectNode];
+        const newEdges: MindEdge[] = [{ id: eid(), from: BRAIN_ID, to: projectNode.id, type: 'project', strength: 1, animated: true, createdAt: Date.now() }];
+
+        // Create phase sub-nodes
+        analysis.phases.forEach((phase, pi) => {
+          const phaseAngle = projectAngle + (pi / analysis.phases.length) * Math.PI * 2;
+          const phaseDist = 180;
+          const phaseNode = makeNode({
+            id: nid(), label: phase.name, tag: 'مرحلة', summary: phase.description,
+            x: projectNode.x + Math.cos(phaseAngle) * phaseDist,
+            y: projectNode.y + Math.sin(phaseAngle) * phaseDist,
+            depth: 2, parentId: projectNode.id, color: '#f59e0b',
+            connections: [projectNode.id], knowledgeLevel: 10,
+          });
+          newNodes.push(phaseNode);
+          newEdges.push({ id: eid(), from: projectNode.id, to: phaseNode.id, type: 'project', strength: 0.8, animated: true, createdAt: Date.now() });
+
+          // Task sub-nodes
+          phase.tasks.forEach((task, ti) => {
+            const taskAngle = phaseAngle + (ti / phase.tasks.length) * Math.PI * 1.5 - 0.3;
+            const taskDist = 120;
+            const taskNode = makeNode({
+              id: nid(), label: task.label, tag: 'مهمة', summary: task.description,
+              x: phaseNode.x + Math.cos(taskAngle) * taskDist,
+              y: phaseNode.y + Math.sin(taskAngle) * taskDist,
+              depth: 3, parentId: phaseNode.id, color: '#34d399',
+              connections: [phaseNode.id], knowledgeLevel: 0,
+              isProject: false,
+              projectTasks: [{ id: nid(), label: task.label, status: 'pending' }],
+            });
+            newNodes.push(taskNode);
+            newEdges.push({ id: eid(), from: phaseNode.id, to: taskNode.id, type: 'project', strength: 0.6, animated: true, createdAt: Date.now() });
+          });
+        });
+
+        setNodes(prev => [...prev, ...newNodes]);
+        setEdges(prev => [...prev, ...newEdges]);
+        setBrainStats(prev => ({
+          ...prev, totalNodes: prev.totalNodes + newNodes.length, totalConnections: prev.totalConnections + newEdges.length,
+          projectsCreated: prev.projectsCreated + 1, totalKnowledge: prev.totalKnowledge + 20,
+        }));
+        sounds.levelUp(); addTimeline('project', `مشروع جديد: ${analysis.title}`);
+        setIdeaDialogOpen(false); setIdeaText('');
+      }
+    } catch { /* */ }
+    setIdeaLoading(false);
+  }, [ideaText, feedBrain, addTimeline, pushHistory]);
+
+  const executeTask = useCallback(async (taskId: string, taskLabel: string, parentNodeId: string) => {
+    setTaskExecuting(taskId);
+    try {
+      const projectNode = nodesRef.current.find(n => n.id === parentNodeId || (n.isProject));
+      const res = await fetch('/api/brain', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'execute-task', taskLabel, taskDescription: taskLabel, projectContext: projectNode?.label || '' }),
+      });
+      await res.json();
+
+      setNodes(prev => prev.map(n => {
+        if (n.id === parentNodeId) {
+          const updatedTasks = n.projectTasks.map(t => t.id === taskId ? { ...t, status: 'done' as const } : t);
+          const allDone = updatedTasks.every(t => t.status === 'done');
+          return { ...n, projectTasks: updatedTasks, projectProgress: allDone ? 100 : Math.round(updatedTasks.filter(t => t.status === 'done').length / updatedTasks.length * 100), projectPhase: allDone ? 'done' : 'execution' };
+        }
+        return n;
+      }));
+      setBrainStats(prev => ({ ...prev, tasksCompleted: prev.tasksCompleted + 1 }));
+      feedBrain(parentNodeId);
+      addTimeline('project', `تم تنفيذ: ${taskLabel}`);
+    } catch { /* */ }
+    setTaskExecuting(null);
+  }, [feedBrain, addTimeline]);
+
+  // ─── 🧠 Auto-Learn ────────────────────────────────────
+  const autoLearn = useCallback(async () => {
+    setAutoLearnLoading(true);
+    try {
+      const nodeData = nodesRef.current.map(n => ({ label: n.label, tag: n.tag, summary: n.summary, isBrain: n.isBrain }));
+      const res = await fetch('/api/brain', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'auto-learn', nodes: nodeData, brainKnowledge: brainStats.totalKnowledge }),
+      });
+      const data: AutoLearnResult = await res.json();
+      if (data.newNodes?.length) {
+        pushHistory();
+        const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
+        if (brain) {
+          const newNodes: MindNode[] = [];
+          const newEdges: MindEdge[] = [];
+          data.newNodes.forEach((sn, i) => {
+            const angle = (i / data.newNodes.length) * Math.PI * 2 - Math.PI / 2;
+            const dist = 250 + Math.random() * 80;
+            newNodes.push(makeNode({
+              id: nid(), label: sn.label, tag: sn.tag, summary: sn.summary,
+              x: brain.x + Math.cos(angle) * dist, y: brain.y + Math.sin(angle) * dist,
+              depth: 1, parentId: BRAIN_ID, connections: [BRAIN_ID], color: '#a78bfa',
+              knowledgeLevel: 10,
+            }));
+            newEdges.push({ id: eid(), from: BRAIN_ID, to: newNodes[newNodes.length - 1].id, type: 'learning', strength: 0.5, animated: true, createdAt: Date.now() });
+          });
+          // Create links
+          if (data.newLinks) {
+            data.newLinks.forEach(link => {
+              const fromN = nodesRef.current.find(n => n.label === link.fromLabel) || newNodes.find(n => n.label === link.fromLabel);
+              const toN = nodesRef.current.find(n => n.label === link.toLabel) || newNodes.find(n => n.label === link.toLabel);
+              if (fromN && toN) {
+                newEdges.push({ id: eid(), from: fromN.id, to: toN.id, type: 'learning', strength: 0.4, animated: true, createdAt: Date.now() });
+              }
+            });
+          }
+          setNodes(prev => [...prev, ...newNodes]); setEdges(prev => [...prev, ...newEdges]);
+          setBrainStats(prev => ({ ...prev, totalNodes: prev.totalNodes + newNodes.length, totalConnections: prev.totalConnections + newEdges.length }));
+          setTimeout(() => { newNodes.forEach((n, i) => { setTimeout(() => feedBrain(n.id), i * 150); }); }, 200);
+        }
+      }
+      setAutoLearnInsights(data.insights || []);
+      addTimeline('auto-learn', 'تعلم ذاتي: عقد وروابط جديدة');
+      sounds.aiInsight();
+    } catch { /* */ }
+    setAutoLearnLoading(false);
+  }, [brainStats.totalKnowledge, feedBrain, addTimeline, pushHistory]);
+
+  // Auto-learn timer
+  useEffect(() => {
+    if (!autoLearnActive) return;
+    const interval = setInterval(() => { autoLearn(); }, 120000);
+    return () => clearInterval(interval);
+  }, [autoLearnActive, autoLearn]);
+
+  // ─── 🎓 Learning Path ─────────────────────────────────
+  const generateLearningPath = useCallback(async () => {
+    setAiLoading(true);
+    try {
+      const nodeData = nodesRef.current.filter(n => !n.isBrain).map(n => ({ label: n.label, tag: n.tag, summary: n.summary, knowledgeLevel: n.knowledgeLevel }));
+      const res = await fetch('/api/brain', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ask', nodes: nodeData, question: 'اقترح مساراً تعليمياً مثالياً لفهم هذه المواضيع بالترتيب. اذكر أسماء العقد بالترتيب فقط مفصولة بـ |' }),
+      });
+      const data = await res.json();
+      if (data.answer) {
+        const path = data.answer.split('|').map((s: string) => s.trim()).filter((s: string) => s.length > 0);
+        setLearningPath(path);
+      }
+    } catch { /* */ }
+    setAiLoading(false);
+  }, []);
+
+  // ─── 🏆 Achievements ──────────────────────────────────
+  const checkAchievements = useCallback(() => {
+    const currentStats = brainStats;
+    const currentNodes = nodesRef.current;
+    ACHIEVEMENTS.forEach(ach => {
+      if (unlockedAchievements.includes(ach.id)) return;
+      try {
+        if (ach.condition(currentStats, currentNodes)) {
+          setUnlockedAchievements(prev => [...prev, ach.id]);
+          setAchievementToast(ach);
+          sounds.levelUp();
+          setTimeout(() => setAchievementToast(null), 4000);
+        }
+      } catch { /* */ }
+    });
+  }, [brainStats, unlockedAchievements]);
+
+  useEffect(() => { checkAchievements(); }, [checkAchievements]);
+
+  // ─── Export PNG ────────────────────────────────────────
+  const exportPNG = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    try {
+      const link = document.createElement('a');
+      link.download = `mindflow_${Date.now()}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } catch { /* */ }
+  }, []);
+
+  // ─── Export/Import JSON ────────────────────────────────
+  const exportJSON = useCallback(() => {
+    try {
+      const data = { nodes: nodesRef.current, edges: edgesRef.current, brainStats, exploredTopics, unlockedAchievements };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.download = `mindflow_${Date.now()}.json`;
+      link.href = URL.createObjectURL(blob);
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch { /* */ }
+  }, [brainStats, exploredTopics, unlockedAchievements]);
+
+  const importJSON = useCallback(() => {
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = '.json';
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target?.result as string);
+          if (data.nodes && data.edges) {
+            pushHistory();
+            setNodes(data.nodes); setEdges(data.edges);
+            if (data.brainStats) setBrainStats(data.brainStats);
+            if (data.exploredTopics) setExploredTopics(data.exploredTopics);
+            if (data.unlockedAchievements) setUnlockedAchievements(data.unlockedAchievements);
+          }
+        } catch { /* */ }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }, [pushHistory]);
+
+  // ─── Keyboard Shortcuts ────────────────────────────────
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === 'f' || e.key === 'F' || e.key === 'ب') { e.preventDefault(); searchInputRef.current?.focus(); }
+      if (e.key === 'a' || e.key === 'A' || e.key === 'ش') { e.preventDefault(); setAddDialogOpen(true); }
+      if (e.key === 's' || e.key === 'S' || e.key === 'س') { e.preventDefault(); setShowStats(prev => !prev); }
+      if (e.key === 'Delete') {
+        if (selectedNode && selectedNode.id !== BRAIN_ID) { deleteNode(selectedNode.id); }
+        else if (selectedNodeIds.size > 0) { selectedNodeIds.forEach(id => deleteNode(id)); }
+      }
+      if (e.key === 'Escape') {
+        setSelectedNode(null); setSelectedNodeIds(new Set());
+        setConnectMode(false); setConnectFrom(null);
+        setAiPanelOpen(false); setQuizOpen(false);
+        setProjectPanelNode(null); setShowFilterPanel(false);
+        setSearchActive(false); setHighlightedNodes(new Set());
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'y') { e.preventDefault(); redo(); }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedNode, selectedNodeIds, deleteNode, undo, redo]);
+
+  // ─── Virtual Rendering Check ───────────────────────────
+  const isNodeInViewport = useCallback((node: MindNode, vp: { x: number; y: number; scale: number }, W: number, H: number) => {
+    const margin = 100;
+    const sx = node.x * vp.scale + vp.x;
+    const sy = node.y * vp.scale + vp.y;
+    const r = (node.isBrain ? 55 : node.isProject ? 45 : 32) * vp.scale + margin;
+    return sx + r > 0 && sx - r < W && sy + r > 0 && sy - r < H;
+  }, []);
+
   // ─── Canvas Render ─────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
+    const mmCanvas = minimapCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    const mmCtx = mmCanvas?.getContext('2d') ?? null;
 
     function render() {
       if (!ctx || !canvas) return;
       timeRef.current += 0.016;
       const t = timeRef.current;
+
+      // Smooth camera animation
+      const cam = cameraTargetRef.current;
+      if (cam.animating) {
+        const elapsed = performance.now() - cam.startTime;
+        const progress = Math.min(1, elapsed / cam.duration);
+        const ease = 1 - Math.pow(1 - progress, 3); // ease out cubic
+        viewportRef.current.x = cam.fromX + (cam.x - cam.fromX) * ease;
+        viewportRef.current.y = cam.fromY + (cam.y - cam.fromY) * ease;
+        viewportRef.current.scale = cam.fromScale + (cam.scale - cam.fromScale) * ease;
+        if (progress >= 1) cam.animating = false;
+      }
+
       const vp = viewportRef.current;
       const W = canvas.width;
       const H = canvas.height;
+      const isDark = theme === 'dark';
       const filteredIds = getFilteredNodeIds();
 
       ctx.clearRect(0, 0, W, H);
 
+      // Background
+      if (isDark) {
+        ctx.fillStyle = '#050508';
+      } else {
+        ctx.fillStyle = '#f0f0f5';
+      }
+      ctx.fillRect(0, 0, W, H);
+
       // Background grid
       ctx.save();
       ctx.translate(vp.x % (48 * vp.scale), vp.y % (48 * vp.scale));
-      ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.04)';
       ctx.lineWidth = 1;
       for (let x = 0; x < W + 48 * vp.scale; x += 48 * vp.scale) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
       for (let y = 0; y < H + 48 * vp.scale; y += 48 * vp.scale) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
       ctx.restore();
 
       // BG glow
-      const grad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.6);
-      grad.addColorStop(0, 'rgba(0, 255, 224, 0.04)');
-      grad.addColorStop(0.5, 'rgba(255, 60, 172, 0.02)');
-      grad.addColorStop(1, 'transparent');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, W, H);
+      if (isDark) {
+        const grad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.6);
+        grad.addColorStop(0, 'rgba(0, 255, 224, 0.04)');
+        grad.addColorStop(0.5, 'rgba(255, 60, 172, 0.02)');
+        grad.addColorStop(1, 'transparent');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+      }
 
       ctx.save();
       ctx.translate(vp.x, vp.y);
@@ -683,21 +1149,24 @@ export default function MindFlowBrain() {
       const currentNodes = nodesRef.current;
       const currentEdges = edgesRef.current;
 
+      // Node map for fast lookup
+      const nodeMap = new Map<string, MindNode>();
+      currentNodes.forEach(n => nodeMap.set(n.id, n));
+
       // ─── Draw Edges ────────────────────────────────
       currentEdges.forEach(edge => {
-        const from = currentNodes.find(n => n.id === edge.from);
-        const to = currentNodes.find(n => n.id === edge.to);
+        const from = nodeMap.get(edge.from);
+        const to = nodeMap.get(edge.to);
         if (!from || !to) return;
-        // Skip if filtered
         if (filteredIds && (!filteredIds.has(from.id) || !filteredIds.has(to.id))) return;
+        // Virtual: skip if both endpoints are off-screen
+        if (!isNodeInViewport(from, vp, W, H) && !isNodeInViewport(to, vp, W, H)) return;
 
-        const fromR = from.isBrain ? 55 : 32;
-        const toR = to.isBrain ? 55 : 32;
-        const dx = to.x - from.x;
-        const dy = to.y - from.y;
+        const fromR = from.isBrain ? 55 : from.isProject ? 45 : 32;
+        const toR = to.isBrain ? 55 : to.isProject ? 45 : 32;
+        const dx = to.x - from.x; const dy = to.y - from.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist === 0) return;
-
         const nx = dx / dist; const ny = dy / dist;
         const sx = from.x + nx * fromR; const sy = from.y + ny * fromR;
         const ex = to.x - nx * toR; const ey = to.y - ny * toR;
@@ -705,32 +1174,45 @@ export default function MindFlowBrain() {
 
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(mx, my, ex, ey);
 
+        const alpha = isDark ? 1 : 0.7;
         if (edge.type === 'feed') {
           const g = ctx.createLinearGradient(sx, sy, ex, ey);
-          g.addColorStop(0, 'rgba(245, 196, 0, 0.6)'); g.addColorStop(1, 'rgba(0, 255, 224, 0.4)');
+          g.addColorStop(0, `rgba(245, 196, 0, ${0.6 * alpha})`); g.addColorStop(1, `rgba(0, 255, 224, ${0.4 * alpha})`);
           ctx.strokeStyle = g; ctx.lineWidth = 2; ctx.setLineDash([]);
         } else if (edge.type === 'alliance') {
           const g = ctx.createLinearGradient(sx, sy, ex, ey);
-          g.addColorStop(0, 'rgba(245, 196, 0, 0.5)'); g.addColorStop(1, 'rgba(167, 139, 250, 0.5)');
+          g.addColorStop(0, `rgba(245, 196, 0, ${0.5 * alpha})`); g.addColorStop(1, `rgba(167, 139, 250, ${0.5 * alpha})`);
           ctx.strokeStyle = g; ctx.lineWidth = 2.5; ctx.setLineDash([]);
-        } else if (edge.type === 'ai-link') {
-          ctx.strokeStyle = 'rgba(167, 139, 250, 0.35)'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 5]);
+        } else if (edge.type === 'ai-link' || edge.type === 'learning') {
+          ctx.strokeStyle = `rgba(167, 139, 250, ${0.35 * alpha})`; ctx.lineWidth = 1.5; ctx.setLineDash([3, 5]);
+        } else if (edge.type === 'project') {
+          const g = ctx.createLinearGradient(sx, sy, ex, ey);
+          g.addColorStop(0, `rgba(245, 158, 11, ${0.6 * alpha})`); g.addColorStop(1, `rgba(52, 211, 153, ${0.4 * alpha})`);
+          ctx.strokeStyle = g; ctx.lineWidth = 2; ctx.setLineDash([]);
         } else if (edge.type === 'cross-link') {
-          ctx.strokeStyle = `rgba(255, 107, 157, ${0.15 + edge.strength * 0.25})`; ctx.lineWidth = 1; ctx.setLineDash([4, 8]);
+          ctx.strokeStyle = `rgba(255, 107, 157, ${(0.15 + edge.strength * 0.25) * alpha})`; ctx.lineWidth = 1; ctx.setLineDash([4, 8]);
         } else {
           const g = ctx.createLinearGradient(sx, sy, ex, ey);
-          g.addColorStop(0, 'rgba(0, 255, 224, 0.4)'); g.addColorStop(1, 'rgba(167, 139, 250, 0.3)');
+          g.addColorStop(0, `rgba(0, 255, 224, ${0.4 * alpha})`); g.addColorStop(1, `rgba(167, 139, 250, ${0.3 * alpha})`);
           ctx.strokeStyle = g; ctx.lineWidth = 1.5; ctx.setLineDash([5, 6]);
         }
         ctx.stroke(); ctx.setLineDash([]);
 
-        // Animated dot
-        if (edge.animated || edge.type === 'feed' || edge.type === 'alliance') {
+        // Animated dot (flow particle)
+        if (edge.animated || edge.type === 'feed' || edge.type === 'alliance' || edge.type === 'project') {
           const progress = ((t * 0.3 + edge.strength) % 1);
           const qx = (1 - progress) ** 2 * sx + 2 * (1 - progress) * progress * mx + progress ** 2 * ex;
           const qy = (1 - progress) ** 2 * sy + 2 * (1 - progress) * progress * my + progress ** 2 * ey;
           ctx.beginPath(); ctx.arc(qx, qy, edge.type === 'feed' ? 3 : 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = edge.type === 'feed' ? '#f5c400' : edge.type === 'alliance' ? '#a78bfa' : edge.type === 'ai-link' ? '#a78bfa' : '#ff6b9d';
+          ctx.fillStyle = edge.type === 'feed' ? '#f5c400' : edge.type === 'alliance' ? '#a78bfa' : edge.type === 'project' ? '#f59e0b' : '#ff6b9d';
+          ctx.fill();
+
+          // Second flow particle offset
+          const progress2 = ((t * 0.3 + edge.strength + 0.5) % 1);
+          const qx2 = (1 - progress2) ** 2 * sx + 2 * (1 - progress2) * progress2 * mx + progress2 ** 2 * ex;
+          const qy2 = (1 - progress2) ** 2 * sy + 2 * (1 - progress2) * progress2 * my + progress2 ** 2 * ey;
+          ctx.beginPath(); ctx.arc(qx2, qy2, 1.5, 0, Math.PI * 2);
+          ctx.fillStyle = edge.type === 'feed' ? 'rgba(245,196,0,0.5)' : edge.type === 'alliance' ? 'rgba(167,139,250,0.5)' : 'rgba(255,107,157,0.5)';
           ctx.fill();
         }
       });
@@ -758,16 +1240,19 @@ export default function MindFlowBrain() {
       // ─── Draw Nodes ────────────────────────────────
       currentNodes.forEach(node => {
         if (filteredIds && !filteredIds.has(node.id)) return;
+        if (!isNodeInViewport(node, vp, W, H)) return;
 
+        // Entry animation scale
+        const animScale = node.enterAnim < 1 ? 0.3 + node.enterAnim * 0.7 * (1 + Math.sin(node.enterAnim * Math.PI) * 0.15) : 1;
         const isBrain = node.isBrain;
-        const isSelected = selectedNode?.id === node.id;
+        const isProj = node.isProject;
+        const isSelected = selectedNode?.id === node.id || selectedNodeIds.has(node.id);
         const isHighlighted = highlightedNodes.has(node.id);
         const isSearchDimmed = searchActive && !isBrain && !isHighlighted;
-        const radius = isBrain
-          ? 40 + Math.sin(t * 2) * 5 + Math.min(20, brainStats.totalKnowledge / 50)
-          : 25 + node.knowledgeLevel / 10;
+        const baseRadius = isBrain ? 40 + Math.sin(t * 2) * 5 + Math.min(20, brainStats.totalKnowledge / 50) : isProj ? 38 : 25 + node.knowledgeLevel / 10;
+        const radius = baseRadius * animScale;
 
-        // 🕸️ Heatmap glow
+        // Heatmap glow
         if (viewMode === 'heatmap' && !isBrain) {
           const heat = node.connections.length / 5;
           if (heat > 0) {
@@ -784,11 +1269,19 @@ export default function MindFlowBrain() {
           const pulse = 1 + Math.sin(t * 1.5) * 0.08;
           for (let ring = 3; ring >= 0; ring--) {
             ctx.beginPath(); ctx.arc(node.x, node.y, radius * pulse + ring * 15, 0, Math.PI * 2);
-            ctx.strokeStyle = `rgba(245, 196, 0, ${0.06 - ring * 0.012})`; ctx.lineWidth = 1.5; ctx.stroke();
+            ctx.strokeStyle = isDark ? `rgba(245, 196, 0, ${0.06 - ring * 0.012})` : `rgba(180, 140, 0, ${0.08 - ring * 0.015})`;
+            ctx.lineWidth = 1.5; ctx.stroke();
           }
         }
 
-        // Dormant overlay (🧬)
+        // Project glow
+        if (isProj) {
+          const pulse = 1 + Math.sin(t * 2) * 0.06;
+          ctx.beginPath(); ctx.arc(node.x, node.y, radius * pulse + 10, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(245, 158, 11, 0.2)'; ctx.lineWidth = 2; ctx.stroke();
+        }
+
+        // Dormant overlay
         if (node.dormant) {
           ctx.beginPath(); ctx.arc(node.x, node.y, radius + 5, 0, Math.PI * 2);
           ctx.strokeStyle = 'rgba(107, 114, 128, 0.4)'; ctx.lineWidth = 2;
@@ -798,27 +1291,34 @@ export default function MindFlowBrain() {
         // Body
         ctx.beginPath(); ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
         const bodyG = ctx.createRadialGradient(node.x - radius * 0.3, node.y - radius * 0.3, 0, node.x, node.y, radius);
-        bodyG.addColorStop(0, isBrain ? 'rgba(40, 35, 10, 0.95)' : 'rgba(10, 10, 20, 0.92)');
-        bodyG.addColorStop(1, isBrain ? 'rgba(20, 18, 5, 0.95)' : 'rgba(5, 5, 12, 0.92)');
+        if (isDark) {
+          bodyG.addColorStop(0, isBrain ? 'rgba(40, 35, 10, 0.95)' : isProj ? 'rgba(40, 30, 5, 0.95)' : 'rgba(10, 10, 20, 0.92)');
+          bodyG.addColorStop(1, isBrain ? 'rgba(20, 18, 5, 0.95)' : isProj ? 'rgba(25, 18, 3, 0.95)' : 'rgba(5, 5, 12, 0.92)');
+        } else {
+          bodyG.addColorStop(0, isBrain ? 'rgba(255, 250, 220, 0.95)' : isProj ? 'rgba(255, 245, 210, 0.95)' : 'rgba(240, 240, 250, 0.92)');
+          bodyG.addColorStop(1, isBrain ? 'rgba(250, 240, 190, 0.95)' : isProj ? 'rgba(250, 235, 190, 0.95)' : 'rgba(230, 230, 245, 0.92)');
+        }
         ctx.fillStyle = bodyG; ctx.fill();
 
         // Dim overlay for search
         if (isSearchDimmed) {
           ctx.beginPath(); ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(5, 5, 8, 0.7)'; ctx.fill();
+          ctx.fillStyle = isDark ? 'rgba(5, 5, 8, 0.7)' : 'rgba(200, 200, 210, 0.7)';
+          ctx.fill();
         }
 
         // Border
         ctx.beginPath(); ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
         if (isBrain) { ctx.strokeStyle = `rgba(245, 196, 0, ${0.5 + Math.sin(t * 2) * 0.2})`; ctx.lineWidth = 2.5; }
-        else if (isSelected) { ctx.strokeStyle = 'rgba(0, 255, 224, 0.8)'; ctx.lineWidth = 2; }
+        else if (isSelected) { ctx.strokeStyle = 'rgba(0, 255, 224, 0.8)'; ctx.lineWidth = 2.5; }
         else if (isHighlighted) { ctx.strokeStyle = 'rgba(0, 255, 224, 0.7)'; ctx.lineWidth = 2.5; }
         else if (node.dormant) { ctx.strokeStyle = 'rgba(107, 114, 128, 0.3)'; ctx.lineWidth = 1; }
+        else if (isProj) { ctx.strokeStyle = 'rgba(245, 158, 11, 0.6)'; ctx.lineWidth = 2; }
         else if (node.isCustom) { ctx.strokeStyle = 'rgba(255, 107, 157, 0.5)'; ctx.lineWidth = 1.5; }
         else { ctx.strokeStyle = node.color + '60'; ctx.lineWidth = 1.5; }
         ctx.stroke();
 
-        // 🧬 Maturity ring
+        // Maturity ring
         if (!isBrain) {
           const mColor = getMaturityColor(node.maturity);
           ctx.beginPath(); ctx.arc(node.x, node.y, radius + 4, -Math.PI / 2, -Math.PI / 2 + (Math.PI * 2 * node.knowledgeLevel / 100));
@@ -838,20 +1338,36 @@ export default function MindFlowBrain() {
           }
         }
 
+        // Project progress bar
+        if (isProj && node.projectProgress > 0) {
+          const barW = radius * 1.6; const barH = 4;
+          const barX = node.x - barW / 2; const barY = node.y + radius + 8;
+          ctx.fillStyle = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)';
+          ctx.fillRect(barX, barY, barW, barH);
+          ctx.fillStyle = node.projectProgress === 100 ? '#34d399' : '#f59e0b';
+          ctx.fillRect(barX, barY, barW * node.projectProgress / 100, barH);
+        }
+
         // Label
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const textCol = isDark ? '#e8e8f0' : '#1a1a2e';
         if (isBrain) {
           ctx.font = 'bold 16px sans-serif'; ctx.fillStyle = '#f5c400';
           ctx.fillText('🧠', node.x, node.y - 6);
           ctx.font = 'bold 13px sans-serif'; ctx.fillText('العقل', node.x, node.y + 14);
+        } else if (isProj) {
+          ctx.font = 'bold 10px sans-serif'; ctx.fillStyle = '#f59e0b';
+          const maxLen = 12;
+          ctx.fillText(node.label.length > maxLen ? node.label.slice(0, maxLen) + '..' : node.label, node.x, node.y - 8);
+          ctx.font = '9px sans-serif'; ctx.fillStyle = textCol + '80';
+          ctx.fillText(`${node.projectPhase === 'done' ? '✅' : '🚀'} ${node.projectProgress}%`, node.x, node.y + 8);
         } else {
           const maxLen = radius < 30 ? 10 : 14;
           ctx.font = 'bold 11px sans-serif';
           ctx.fillStyle = node.dormant ? 'rgba(107,114,128,0.6)' : isHighlighted ? '#00ffe0' : node.isCustom ? '#ff6b9d' : node.color;
           ctx.fillText(node.label.length > maxLen ? node.label.slice(0, maxLen) + '..' : node.label, node.x, node.y - 6);
-          // Maturity + tag
           ctx.font = '9px sans-serif';
-          ctx.fillStyle = 'rgba(232, 232, 240, 0.3)';
+          ctx.fillStyle = isDark ? 'rgba(232, 232, 240, 0.3)' : 'rgba(30, 30, 50, 0.3)';
           ctx.fillText(`${getMaturityEmoji(node.maturity)} ${node.tag}`, node.x, node.y + 10);
         }
 
@@ -868,13 +1384,65 @@ export default function MindFlowBrain() {
         }
       });
 
+      // Selection rectangle
+      if (selectionRef.current.active) {
+        const sel = selectionRef.current;
+        const sx1 = Math.min(sel.startX, sel.endX); const sy1 = Math.min(sel.startY, sel.endY);
+        const sw = Math.abs(sel.endX - sel.startX); const sh = Math.abs(sel.endY - sel.startY);
+        // Convert from screen to world
+        const wx1 = (sx1 - vp.x) / vp.scale; const wy1 = (sy1 - vp.y) / vp.scale;
+        const ww = sw / vp.scale; const wh = sh / vp.scale;
+        ctx.strokeStyle = 'rgba(0, 255, 224, 0.5)'; ctx.lineWidth = 1 / vp.scale;
+        ctx.setLineDash([4 / vp.scale, 4 / vp.scale]);
+        ctx.strokeRect(wx1, wy1, ww, wh);
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(0, 255, 224, 0.05)'; ctx.fillRect(wx1, wy1, ww, wh);
+      }
+
       ctx.restore();
+
+      // ─── Minimap ────────────────────────────────────
+      if (mmCtx && mmCanvas) {
+        const mw = mmCanvas.width; const mh = mmCanvas.height;
+        mmCtx.clearRect(0, 0, mw, mh);
+        mmCtx.fillStyle = isDark ? 'rgba(5,5,8,0.85)' : 'rgba(240,240,245,0.85)';
+        mmCtx.fillRect(0, 0, mw, mh);
+
+        // Find bounds
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        currentNodes.forEach(n => {
+          minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
+          maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y);
+        });
+        const pad = 100;
+        minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+        const worldW = maxX - minX || 1; const worldH = maxY - minY || 1;
+        const mmScale = Math.min(mw / worldW, mh / worldH);
+
+        currentNodes.forEach(node => {
+          const mx = (node.x - minX) * mmScale;
+          const my = (node.y - minY) * mmScale;
+          const mr = Math.max(1.5, (node.isBrain ? 5 : node.isProject ? 4 : 2.5) * mmScale);
+          mmCtx.beginPath(); mmCtx.arc(mx, my, mr, 0, Math.PI * 2);
+          mmCtx.fillStyle = node.isBrain ? '#f5c400' : node.isProject ? '#f59e0b' : node.color + '80';
+          mmCtx.fill();
+        });
+
+        // Viewport rect
+        const vpLeft = (-vp.x / vp.scale - minX) * mmScale;
+        const vpTop = (-vp.y / vp.scale - minY) * mmScale;
+        const vpW = (W / vp.scale) * mmScale;
+        const vpH = (H / vp.scale) * mmScale;
+        mmCtx.strokeStyle = 'rgba(0, 255, 224, 0.6)'; mmCtx.lineWidth = 1;
+        mmCtx.strokeRect(vpLeft, vpTop, vpW, vpH);
+      }
+
       animRef.current = requestAnimationFrame(render);
     }
 
     animRef.current = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animRef.current);
-  }, [selectedNode, brainStats.totalKnowledge, connectMode, connectFrom, highlightedNodes, searchActive, viewMode, filterState, getFilteredNodeIds]);
+  }, [selectedNode, brainStats.totalKnowledge, connectMode, connectFrom, highlightedNodes, searchActive, viewMode, filterState, getFilteredNodeIds, theme, selectedNodeIds, isNodeInViewport]);
 
   // ─── Mouse/Touch Handlers ──────────────────────────────
   useEffect(() => {
@@ -888,504 +1456,495 @@ export default function MindFlowBrain() {
       if (hit) {
         dragRef.current = { nodeId: hit.id, startX: sx, startY: sy, nodeStartX: hit.x, nodeStartY: hit.y, moved: false };
       } else {
-        panRef.current = { active: true, startX: sx, startY: sy, vpStartX: viewportRef.current.x, vpStartY: viewportRef.current.y };
-        setSelectedNode(null);
+        // Multi-select with Shift
+        if (e.shiftKey) {
+          selectionRef.current = { active: true, startX: sx, startY: sy, endX: sx, endY: sy };
+        } else {
+          panRef.current = { active: true, startX: sx, startY: sy, vpStartX: viewportRef.current.x, vpStartY: viewportRef.current.y };
+          setSelectedNode(null);
+          setSelectedNodeIds(new Set());
+        }
       }
     }
+
     function onPointerMove(e: PointerEvent) {
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
+
       if (dragRef.current.nodeId) {
         const dx = sx - dragRef.current.startX; const dy = sy - dragRef.current.startY;
         if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragRef.current.moved = true;
-        const vp = viewportRef.current;
-        setNodes(prev => prev.map(n => n.id === dragRef.current.nodeId ? { ...n, x: dragRef.current.nodeStartX + dx / vp.scale, y: dragRef.current.nodeStartY + dy / vp.scale } : n));
+        if (dragRef.current.moved) {
+          const vp = viewportRef.current;
+          setNodes(prev => prev.map(n => n.id === dragRef.current.nodeId ? { ...n, x: dragRef.current.nodeStartX + dx / vp.scale, y: dragRef.current.nodeStartY + dy / vp.scale } : n));
+        }
+      } else if (selectionRef.current.active) {
+        selectionRef.current.endX = sx; selectionRef.current.endY = sy;
       } else if (panRef.current.active) {
-        viewportRef.current = { ...viewportRef.current, x: panRef.current.vpStartX + (sx - panRef.current.startX), y: panRef.current.vpStartY + (sy - panRef.current.startY), scale: viewportRef.current.scale };
+        const dx = sx - panRef.current.startX; const dy = sy - panRef.current.startY;
+        viewportRef.current.x = panRef.current.vpStartX + dx;
+        viewportRef.current.y = panRef.current.vpStartY + dy;
       }
     }
+
     function onPointerUp(e: PointerEvent) {
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
+
+      // Multi-select
+      if (selectionRef.current.active) {
+        const sel = selectionRef.current;
+        const vp = viewportRef.current;
+        const wx1 = Math.min(sel.startX, sel.endX); const wy1 = Math.min(sel.startY, sel.endY);
+        const wx2 = Math.max(sel.startX, sel.endX); const wy2 = Math.max(sel.startY, sel.endY);
+        const worldX1 = (wx1 - vp.x) / vp.scale; const worldY1 = (wy1 - vp.y) / vp.scale;
+        const worldX2 = (wx2 - vp.x) / vp.scale; const worldY2 = (wy2 - vp.y) / vp.scale;
+        const selected = new Set<string>();
+        nodesRef.current.forEach(n => {
+          if (n.x >= worldX1 && n.x <= worldX2 && n.y >= worldY1 && n.y <= worldY2 && !n.isBrain) {
+            selected.add(n.id);
+          }
+        });
+        setSelectedNodeIds(selected);
+        selectionRef.current = { active: false, startX: 0, startY: 0, endX: 0, endY: 0 };
+        return;
+      }
+
       if (dragRef.current.nodeId && !dragRef.current.moved) {
-        const hit = findNodeAt(sx, sy);
-        if (hit) {
-          if (connectMode && connectFrom && hit.id !== connectFrom) {
-            connectNodes(connectFrom, hit.id);
-            setConnectMode(false); setConnectFrom(null);
+        const hitNode = nodesRef.current.find(n => n.id === dragRef.current.nodeId);
+        if (hitNode) {
+          if (connectMode && connectFrom) {
+            if (hitNode.id !== connectFrom && !hitNode.isBrain) {
+              connectNodes(connectFrom, hitNode.id);
+              setConnectMode(false); setConnectFrom(null);
+            }
           } else {
-            setSelectedNode(hit);
+            setSelectedNode(hitNode);
+            setSelectedNodeIds(new Set([hitNode.id]));
+            if (hitNode.isProject) setProjectPanelNode(hitNode);
           }
         }
       }
       dragRef.current = { nodeId: null, startX: 0, startY: 0, nodeStartX: 0, nodeStartY: 0, moved: false };
       panRef.current = { active: false, startX: 0, startY: 0, vpStartX: 0, vpStartY: 0 };
     }
+
     function onWheel(e: WheelEvent) {
       e.preventDefault();
-      const delta = e.deltaY > 0 ? 0.9 : 1.1;
-      const newScale = Math.min(3, Math.max(0.3, viewportRef.current.scale * delta));
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-      viewportRef.current = {
-        x: sx - (sx - viewportRef.current.x) * (newScale / viewportRef.current.scale),
-        y: sy - (sy - viewportRef.current.y) * (newScale / viewportRef.current.scale),
-        scale: newScale,
-      };
+      const vp = viewportRef.current;
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      const newScale = Math.max(0.2, Math.min(5, vp.scale * delta));
+      const wx = (sx - vp.x) / vp.scale; const wy = (sy - vp.y) / vp.scale;
+      vp.x = sx - wx * newScale; vp.y = sy - wy * newScale;
+      vp.scale = newScale;
+    }
+
+    function onDblClick(e: PointerEvent) {
+      const rect = canvas!.getBoundingClientRect();
+      const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
+      const hit = findNodeAt(sx, sy);
+      if (hit) {
+        if (hit.hasChildren || hit.childrenData?.length) {
+          expandNode(hit.id);
+        } else {
+          feedBrain(hit.id);
+        }
+      } else {
+        setAddDialogOpen(true);
+      }
     }
 
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
+    canvas.addEventListener('dblclick', onDblClick);
     return () => {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('dblclick', onDblClick);
     };
-  }, [findNodeAt, connectMode, connectFrom, connectNodes]);
+  }, [findNodeAt, connectMode, connectFrom, connectNodes, expandNode, feedBrain]);
 
-  const resetView = () => { viewportRef.current = { x: 0, y: 0, scale: 1 }; };
-  const levelInfo = getBrainLevel(brainStats.totalKnowledge);
+  // ─── Minimap Click ─────────────────────────────────────
+  const onMinimapClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const mmCanvas = minimapCanvasRef.current;
+    if (!mmCanvas) return;
+    const rect = mmCanvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left; const my = e.clientY - rect.top;
+    const currentNodes = nodesRef.current;
+    if (currentNodes.length === 0) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    currentNodes.forEach(n => { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x); maxY = Math.max(maxY, n.y); });
+    const pad = 100; minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+    const worldW = maxX - minX || 1; const worldH = maxY - minY || 1;
+    const mmScale = Math.min(mmCanvas.width / worldW, mmCanvas.height / worldH);
+    const worldX = mx / mmScale + minX; const worldY = my / mmScale + minY;
+    const vp = viewportRef.current;
+    cameraTargetRef.current = {
+      x: -worldX * vp.scale + window.innerWidth / 2,
+      y: -worldY * vp.scale + window.innerHeight / 2,
+      scale: vp.scale,
+      animating: true, startTime: performance.now(), duration: 300,
+      fromX: vp.x, fromY: vp.y, fromScale: vp.scale,
+    };
+  }, []);
 
-  // Get all unique tags
-  const allTags = [...new Set(nodes.filter(n => !n.isBrain).map(n => n.tag))];
+  // ─── Theme toggle ──────────────────────────────────────
+  const toggleTheme = useCallback(() => { setTheme(prev => prev === 'dark' ? 'light' : 'dark'); }, []);
 
+  // ─── Sound toggle ──────────────────────────────────────
+  const toggleSound = useCallback(() => {
+    const newMuted = !muted;
+    setMuted(newMuted);
+    setMutedGlobal(newMuted);
+    toggleMute();
+  }, [muted]);
+
+  // ─── Topic pills ───────────────────────────────────────
+  const topicKeys = Object.keys(KNOWLEDGE_BASE);
+
+  // ─── JSX ───────────────────────────────────────────────
   return (
-    <div ref={containerRef} className="fixed inset-0 bg-[#050508] overflow-hidden" style={{ fontFamily: "'Space Mono', monospace" }}>
-      <canvas ref={canvasRef} className="absolute inset-0 z-10" style={{ touchAction: 'none' }} />
+    <div ref={containerRef} className="relative w-screen h-screen overflow-hidden" style={{ background: theme === 'dark' ? '#050508' : '#f0f0f5' }}>
+      {/* Canvas */}
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ touchAction: 'none' }} />
 
-      {/* ═══ TOP BAR ═══ */}
-      <div className="fixed top-0 left-0 right-0 z-50 flex items-center gap-2 px-3 py-2 bg-[rgba(5,5,8,0.9)] backdrop-blur-xl border-b border-white/[0.06]">
-        <div className="flex items-center gap-1.5 mr-1">
-          <span className="text-[#00ffe0] font-bold text-base" style={{ fontFamily: 'Syne, sans-serif' }}>Mind<span className="text-[#ff3cac]">Flow</span></span>
-          <span className="text-[#f5c400] text-lg">{levelInfo.emoji}</span>
+      {/* ─── Top Bar ──────────────────────────────────── */}
+      <div className="absolute top-0 left-0 right-0 z-20 flex items-center gap-2 px-3 py-2 flex-wrap" style={{ background: theme === 'dark' ? 'rgba(5,5,8,0.85)' : 'rgba(240,240,245,0.9)', backdropFilter: 'blur(10px)', borderBottom: theme === 'dark' ? '1px solid rgba(255,255,255,0.06)' : '1px solid rgba(0,0,0,0.08)' }}>
+        {/* Logo */}
+        <div className="flex items-center gap-1.5 mr-2">
+          <span className="text-lg">🧠</span>
+          <span className={`text-sm font-bold ${theme === 'dark' ? 'text-yellow-400' : 'text-yellow-600'}`}>MindFlow</span>
         </div>
 
-        {/* 🔍 Search */}
-        <div className="relative flex-1 max-w-[200px]">
-          <input
-            value={searchQuery}
-            onChange={e => { setSearchQuery(e.target.value); performSearch(e.target.value); }}
-            placeholder="🔍 بحث..."
-            className="w-full bg-white/[0.05] border border-white/10 rounded-lg px-3 py-1.5 text-white text-xs outline-none focus:border-[#00ffe0]/40 placeholder:text-white/20"
-            dir="rtl"
+        {/* Search */}
+        <div className="relative flex-1 max-w-xs">
+          <Input ref={searchInputRef} value={searchQuery} onChange={e => { setSearchQuery(e.target.value); performSearch(e.target.value); }}
+            placeholder="🔍 ابحث..." className={`h-8 text-xs ${theme === 'dark' ? 'bg-white/5 border-white/10 text-white' : 'bg-black/5 border-black/10 text-black'}`}
+            onKeyDown={e => { if (e.key === 'Escape') { setSearchQuery(''); performSearch(''); (e.target as HTMLInputElement).blur(); } }}
           />
           {searchActive && searchResults.length > 0 && (
-            <div className="absolute top-full mt-1 right-0 w-64 max-h-48 overflow-y-auto bg-[rgba(10,10,20,0.95)] backdrop-blur-xl border border-white/10 rounded-lg shadow-xl z-50" dir="rtl">
-              {searchResults.map(n => (
-                <button
-                  key={n.id}
-                  onClick={() => {
-                    viewportRef.current = { x: window.innerWidth / 2 - n.x * viewportRef.current.scale, y: window.innerHeight / 2 - n.y * viewportRef.current.scale, scale: viewportRef.current.scale };
-                    setSelectedNode(n);
-                    setSearchActive(false);
-                  }}
-                  className="w-full text-right px-3 py-2 text-xs hover:bg-white/[0.05] border-b border-white/[0.04] last:border-0"
-                >
-                  <div className="text-white/80 font-bold">{getMaturityEmoji(n.maturity)} {n.label}</div>
-                  <div className="text-white/30 text-[10px]">{n.tag} — {n.summary.slice(0, 40)}...</div>
+            <div className={`absolute top-full mt-1 left-0 right-0 rounded-lg border max-h-48 overflow-y-auto z-50 ${theme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
+              {searchResults.slice(0, 8).map(n => (
+                <button key={n.id} className={`w-full text-right px-3 py-1.5 text-xs hover:bg-white/10 flex items-center gap-2 ${theme === 'dark' ? 'text-gray-200' : 'text-gray-800'}`}
+                  onClick={() => { navigateToNode(n.id); setSelectedNode(n); }}>
+                  <span style={{ color: n.color }}>●</span> {n.label}
                 </button>
               ))}
             </div>
           )}
         </div>
 
-        {/* Topic buttons */}
-        <div className="flex gap-1 overflow-x-auto flex-1 scrollbar-hide py-0.5">
-          {Object.entries(KNOWLEDGE_BASE).map(([key, topic]) => (
-            <button key={key} onClick={() => expandTopic(key)}
-              className="flex-shrink-0 px-2.5 py-1 rounded-full border border-white/10 bg-white/[0.04] text-white/50 text-[10px] hover:bg-[rgba(0,255,224,0.12)] hover:text-[#00ffe0] hover:border-[rgba(0,255,224,0.4)] transition-all">
-              {topic.emoji} {topic.label}
+        {/* Topic pills */}
+        <div className="flex gap-1 flex-wrap">
+          {topicKeys.filter(k => !exploredTopics.includes(k)).map(k => (
+            <button key={k} onClick={() => expandTopic(k)}
+              className="px-2 py-0.5 rounded-full text-[10px] font-medium transition-all hover:scale-105"
+              style={{ background: TOPIC_COLORS[k] + '20', color: TOPIC_COLORS[k], border: `1px solid ${TOPIC_COLORS[k]}40` }}>
+              {KNOWLEDGE_BASE[k].emoji} {k}
             </button>
           ))}
         </div>
 
         {/* Action buttons */}
-        <div className="flex gap-1 flex-shrink-0">
-          <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-            <DialogTrigger asChild>
-              <button className="px-2.5 py-1 rounded-lg bg-[#ff6b9d] text-black font-bold text-[10px]" style={{ fontFamily: 'Syne, sans-serif' }}>+ عقدة</button>
-            </DialogTrigger>
-            <DialogContent className="bg-[#0d0d14] border-white/10 text-white max-w-sm">
-              <DialogHeader><DialogTitle className="text-[#00ffe0] text-right" style={{ fontFamily: 'Syne, sans-serif' }}>إضافة عقدة جديدة</DialogTitle></DialogHeader>
-              <div className="space-y-3 pt-2">
-                <div><label className="text-xs text-white/40 mb-1 block text-right">الاسم</label><Input value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="اسم العقدة..." className="bg-white/[0.05] border-white/10 text-white text-right" dir="rtl" /></div>
-                <div><label className="text-xs text-white/40 mb-1 block text-right">التصنيف</label><Input value={newTag} onChange={e => setNewTag(e.target.value)} placeholder="تصنيف العقدة..." className="bg-white/[0.05] border-white/10 text-white text-right" dir="rtl" /></div>
-                <div><label className="text-xs text-white/40 mb-1 block text-right">الوصف</label><Textarea value={newSummary} onChange={e => setNewSummary(e.target.value)} placeholder="وصف مختصر..." className="bg-white/[0.05] border-white/10 text-white text-right min-h-[60px]" dir="rtl" /></div>
-                <Button onClick={addCustomNode} className="w-full bg-[#00ffe0] text-black font-bold hover:bg-[#00ffe0]/80" disabled={!newLabel.trim()}>أضف وأطعم العقل 🧠</Button>
-              </div>
-            </DialogContent>
-          </Dialog>
-
-          {/* 🤖 AI Button */}
-          <button onClick={aiSummarize} disabled={aiLoading}
-            className="px-2.5 py-1 rounded-lg bg-[rgba(167,139,250,0.2)] text-[#a78bfa] border border-[rgba(167,139,250,0.3)] text-[10px] font-bold hover:bg-[rgba(167,139,250,0.3)] transition-all disabled:opacity-50">
-            🤖 AI
-          </button>
-
-          {/* 🕸️ View Mode */}
-          <button onClick={() => {
-            const modes: ViewMode[] = ['normal', 'heatmap', 'filtered'];
-            const idx = modes.indexOf(viewMode);
-            setViewMode(modes[(idx + 1) % modes.length]);
-          }}
-            className="px-2.5 py-1 rounded-lg border border-white/10 bg-white/[0.04] text-white/50 text-[10px] hover:text-[#f5c400] hover:border-[rgba(245,196,0,0.4)] transition-all">
-            {viewMode === 'normal' ? '🕸️' : viewMode === 'heatmap' ? '🔥' : '🔽'} {viewMode === 'normal' ? '' : viewMode === 'heatmap' ? 'حرارية' : 'فلتر'}
-          </button>
-
-          {/* 🔊 Mute */}
-          <button onClick={() => { const m = toggleMute(); setMuted(m); }}
-            className="px-2 py-1 rounded-lg border border-white/10 bg-white/[0.04] text-white/50 text-[10px] hover:text-white/70 transition-all">
-            {muted ? '🔇' : '🔊'}
-          </button>
-
-          <button onClick={() => setShowStats(!showStats)}
-            className="px-2 py-1 rounded-lg border border-white/10 bg-white/[0.04] text-white/50 text-[10px] hover:text-[#f5c400] hover:border-[rgba(245,196,0,0.4)] transition-all">
-            📊
-          </button>
+        <div className="flex gap-1 items-center mr-2">
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={() => setAddDialogOpen(true)}>➕ عقدة</Button>
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={() => setIdeaDialogOpen(true)}>💡 فكرة</Button>
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={() => setAiPanelOpen(true)}>🤖 AI</Button>
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={generateQuiz}>🎓 تعلّم</Button>
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={() => setViewMode(prev => prev === 'heatmap' ? 'normal' : 'heatmap')}>
+            {viewMode === 'heatmap' ? '🔥' : '🌐'}
+          </Button>
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={toggleTheme}>{theme === 'dark' ? '☀️' : '🌙'}</Button>
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={toggleSound}>{muted ? '🔇' : '🔊'}</Button>
+          <Button size="sm" variant="ghost" className={`h-7 text-xs px-2 ${theme === 'dark' ? 'text-gray-300 hover:text-white' : 'text-gray-600 hover:text-black'}`} onClick={() => setShowStats(prev => !prev)}>📊</Button>
         </div>
       </div>
 
-      {/* ═══ FILTER PANEL (🕸️ Feature 8) ═══ */}
-      {viewMode === 'filtered' && (
-        <div className="fixed top-14 left-3 z-50 w-56 bg-[rgba(10,10,20,0.95)] backdrop-blur-xl border border-white/10 rounded-xl p-3 space-y-2" dir="rtl">
-          <div className="text-[#f5c400] text-xs font-bold mb-1">🔽 فلترة العقد</div>
-          <div>
-            <label className="text-white/30 text-[10px] block mb-0.5">الحد الأدنى للمعرفة: {filterState.minKnowledge}%</label>
-            <input type="range" min="0" max="100" value={filterState.minKnowledge}
-              onChange={e => setFilterState(prev => ({ ...prev, minKnowledge: Number(e.target.value) }))}
-              className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[#00ffe0]" />
-          </div>
-          <div>
-            <label className="text-white/30 text-[10px] block mb-0.5">التصنيفات</label>
-            <div className="flex flex-wrap gap-1">
-              {allTags.map(tag => (
-                <button key={tag} onClick={() => setFilterState(prev => ({
-                  ...prev,
-                  tags: prev.tags.includes(tag) ? prev.tags.filter(t => t !== tag) : [...prev.tags, tag],
-                }))}
-                  className={`text-[9px] px-1.5 py-0.5 rounded border transition-all ${filterState.tags.includes(tag) ? 'bg-[rgba(0,255,224,0.15)] text-[#00ffe0] border-[#00ffe0]/30' : 'bg-white/[0.03] text-white/30 border-white/10'}`}>
-                  {tag}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="text-white/30 text-[10px] block mb-0.5">النضج</label>
-            <div className="flex gap-1">
-              {Object.entries(MATURITY_LEVELS).map(([key, val]) => (
-                <button key={key} onClick={() => setFilterState(prev => ({
-                  ...prev,
-                  maturityFilter: prev.maturityFilter.includes(key) ? prev.maturityFilter.filter(m => m !== key) : [...prev.maturityFilter, key],
-                }))}
-                  className={`text-[9px] px-1.5 py-0.5 rounded border transition-all ${filterState.maturityFilter.includes(key) ? 'bg-[rgba(245,196,0,0.15)] text-[#f5c400] border-[#f5c400]/30' : 'bg-white/[0.03] text-white/30 border-white/10'}`}>
-                  {val.emoji}
-                </button>
-              ))}
-            </div>
-          </div>
-          <label className="flex items-center gap-2 text-white/30 text-[10px] cursor-pointer">
-            <input type="checkbox" checked={filterState.showDormant}
-              onChange={e => setFilterState(prev => ({ ...prev, showDormant: e.target.checked }))}
-              className="accent-[#00ffe0]" />
-            أظهر العقد النائمة
-          </label>
-        </div>
-      )}
+      {/* ─── Minimap ──────────────────────────────────── */}
+      <canvas ref={minimapCanvasRef} width={150} height={100}
+        className="absolute bottom-4 left-4 z-20 rounded-lg border cursor-pointer"
+        style={{ background: theme === 'dark' ? 'rgba(5,5,8,0.8)' : 'rgba(240,240,245,0.8)', borderColor: theme === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+        onClick={onMinimapClick}
+      />
 
-      {/* ═══ STATS PANEL ═══ */}
+      {/* ─── Bottom Bar ───────────────────────────────── */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-3">
+        <Button size="sm" variant="ghost" className={`h-7 text-xs ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}`} onClick={resetView}>🏠 عرض أساسي</Button>
+        <span className={`text-[10px] ${theme === 'dark' ? 'text-gray-600' : 'text-gray-400'}`}>انقر مرتين = توسيع | Shift+سحب = تحديد | Ctrl+Z/Y = تراجع</span>
+      </div>
+
+      {/* ─── Brain Level Badge ────────────────────────── */}
+      <div className="absolute bottom-4 right-4 z-20">
+        <Badge className={`${theme === 'dark' ? 'bg-yellow-900/50 text-yellow-400 border-yellow-700/50' : 'bg-yellow-100 text-yellow-700 border-yellow-300'}`}>
+          {getBrainLevel(brainStats.totalKnowledge).emoji} مستوى {brainStats.level}: {brainStats.levelName} ({brainStats.totalKnowledge})
+        </Badge>
+      </div>
+
+      {/* ─── Stats Panel ──────────────────────────────── */}
       {showStats && (
-        <div className="fixed top-14 right-3 z-50 w-64 bg-[rgba(10,10,20,0.95)] backdrop-blur-xl border border-white/10 rounded-xl p-4 space-y-3 max-h-[80vh] overflow-y-auto" dir="rtl">
-          <div className="flex items-center justify-between">
-            <span className="text-[#f5c400] font-bold text-sm" style={{ fontFamily: 'Syne, sans-serif' }}>🧠 حالة العقل</span>
-            <Badge variant="outline" className="text-[#f5c400] border-[#f5c400]/30 text-[10px]">مستوى {levelInfo.level} — {levelInfo.name}</Badge>
+        <div className={`absolute top-14 right-4 z-30 w-72 rounded-xl border p-4 max-h-[80vh] overflow-y-auto ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
+          <div className="flex justify-between items-center mb-3">
+            <h3 className="text-sm font-bold">📊 إحصائيات العقل</h3>
+            <button onClick={() => setShowStats(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
           </div>
-          <div>
-            <div className="flex justify-between text-[10px] text-white/40 mb-1"><span>المعرفة</span><span>{brainStats.totalKnowledge}</span></div>
-            <div className="h-2 bg-white/[0.05] rounded-full overflow-hidden">
-              <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${Math.min(100, (brainStats.totalKnowledge % 300) / 3)}%`, background: 'linear-gradient(90deg, #f5c400, #00ffe0)' }} />
-            </div>
+          <div className="space-y-1.5 text-xs">
+            <div className="flex justify-between"><span>المعرفة</span><span className="font-mono">{brainStats.totalKnowledge}</span></div>
+            <div className="flex justify-between"><span>العقد</span><span className="font-mono">{brainStats.totalNodes}</span></div>
+            <div className="flex justify-between"><span>الروابط</span><span className="font-mono">{brainStats.totalConnections}</span></div>
+            <div className="flex justify-between"><span>التغذيات</span><span className="font-mono">{brainStats.totalFeeds}</span></div>
+            <div className="flex justify-between"><span>المواضيع</span><span className="font-mono">{brainStats.topicsExplored.length}/6</span></div>
+            <div className="flex justify-between"><span>الاختبارات</span><span className="font-mono">{brainStats.quizCorrect}/{brainStats.quizTotal}</span></div>
+            <div className="flex justify-between"><span>المشاريع</span><span className="font-mono">{brainStats.projectsCreated} ({brainStats.projectsCompleted} مكتمل)</span></div>
+            <div className="flex justify-between"><span>المهام المنفذة</span><span className="font-mono">{brainStats.tasksCompleted}</span></div>
           </div>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div className="bg-white/[0.03] rounded-lg p-2 text-center"><div className="text-[#00ffe0] font-bold text-lg">{nodes.length}</div><div className="text-white/30 text-[10px]">العقد</div></div>
-            <div className="bg-white/[0.03] rounded-lg p-2 text-center"><div className="text-[#ff6b9d] font-bold text-lg">{edges.length}</div><div className="text-white/30 text-[10px]">الروابط</div></div>
-            <div className="bg-white/[0.03] rounded-lg p-2 text-center"><div className="text-[#f5c400] font-bold text-lg">{brainStats.totalFeeds}</div><div className="text-white/30 text-[10px]">التغذيات</div></div>
-            <div className="bg-white/[0.03] rounded-lg p-2 text-center"><div className="text-[#a78bfa] font-bold text-lg">{brainStats.growthRate}%</div><div className="text-white/30 text-[10px]">النمو</div></div>
-          </div>
-
-          {/* 🧬 Maturity distribution */}
-          <div>
-            <div className="text-white/30 text-[10px] mb-1">🧬 توزيع النضج</div>
-            <div className="flex gap-1">
-              {Object.entries(MATURITY_LEVELS).map(([key, val]) => {
-                const count = nodes.filter(n => !n.isBrain && n.maturity === key).length;
-                return count > 0 ? (
-                  <span key={key} className="text-[9px] px-1.5 py-0.5 rounded bg-white/[0.04] border border-white/[0.06]" style={{ color: val.color }}>
-                    {val.emoji} {count}
-                  </span>
-                ) : null;
-              })}
-              {nodes.filter(n => n.dormant).length > 0 && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/[0.04] border border-white/[0.06] text-gray-400">💤 {nodes.filter(n => n.dormant).length}</span>
-              )}
-            </div>
-          </div>
-
-          {/* 🕸️ Timeline */}
-          {brainStats.history.length > 0 && (
-            <div>
-              <div className="text-white/30 text-[10px] mb-1">🕸️ آخر الأنشطة</div>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                {brainStats.history.slice(-10).reverse().map((h, i) => (
-                  <div key={i} className="flex items-center gap-1.5 text-[9px] text-white/30">
-                    <span>{h.event === 'feed' ? '🍎' : h.event === 'ai-insight' ? '🤖' : h.event === 'link' ? '🔗' : h.event === 'expand' ? '📂' : h.event === 'create' ? '➕' : h.event === 'alliance' ? '🤝' : '📊'}</span>
-                    <span className="truncate flex-1">{h.detail}</span>
-                    <span className="text-white/15">{h.knowledge}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {exploredTopics.length > 0 && (
-            <div>
-              <div className="text-white/30 text-[10px] mb-1">المواضيع المستكشفة</div>
-              <div className="flex flex-wrap gap-1">
-                {exploredTopics.map(t => (
-                  <span key={t} className="text-[9px] px-2 py-0.5 rounded-full bg-[rgba(0,255,224,0.08)] text-[#00ffe0] border border-[rgba(0,255,224,0.18)]">
-                    {KNOWLEDGE_BASE[t]?.emoji} {t}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ═══ 🤖 AI PANEL (Feature 1) ═══ */}
-      {aiPanelOpen && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 w-[380px] max-w-[90vw] bg-[rgba(10,10,20,0.97)] backdrop-blur-xl border border-[rgba(167,139,250,0.3)] rounded-xl p-4 space-y-3 max-h-[70vh] overflow-y-auto" dir="rtl">
-          <div className="flex items-center justify-between">
-            <span className="text-[#a78bfa] font-bold text-sm" style={{ fontFamily: 'Syne, sans-serif' }}>🤖 ذكاء العقل</span>
-            <button onClick={() => setAiPanelOpen(false)} className="text-white/30 hover:text-white/60 text-lg leading-none">×</button>
-          </div>
-
-          {aiLoading && (
-            <div className="flex items-center gap-2 text-[#a78bfa] text-xs">
-              <div className="w-4 h-4 border-2 border-[#a78bfa]/30 border-t-[#a78bfa] rounded-full animate-spin" />
-              العقل يفكر...
-            </div>
-          )}
-
-          {aiInsight?.summary && (
-            <div className="bg-[rgba(167,139,250,0.08)] border border-[rgba(167,139,250,0.15)] rounded-lg p-3">
-              <div className="text-[#a78bfa] text-[10px] font-bold mb-1">📋 ملخص العقل</div>
-              <p className="text-white/60 text-xs leading-relaxed">{aiInsight.summary}</p>
-            </div>
-          )}
-
-          {aiInsight?.questions && aiInsight.questions.length > 0 && (
-            <div className="bg-[rgba(245,196,0,0.08)] border border-[rgba(245,196,0,0.15)] rounded-lg p-3">
-              <div className="text-[#f5c400] text-[10px] font-bold mb-1">❓ أسئلة مثيرة</div>
-              {aiInsight.questions.map((q, i) => (
-                <button key={i} onClick={() => { setAiQuestion(q); }}
-                  className="block w-full text-right text-white/50 text-xs py-1 hover:text-[#f5c400] transition-colors">
-                  → {q}
-                </button>
+          <div className="mt-3 pt-3 border-t border-white/10">
+            <h4 className="text-xs font-bold mb-2">🏆 الإنجازات</h4>
+            <div className="space-y-1 max-h-40 overflow-y-auto">
+              {ACHIEVEMENTS.map(ach => (
+                <div key={ach.id} className={`flex items-center gap-2 text-[10px] p-1 rounded ${unlockedAchievements.includes(ach.id) ? (theme === 'dark' ? 'bg-yellow-900/30' : 'bg-yellow-50') : 'opacity-40'}`}>
+                  <span>{unlockedAchievements.includes(ach.id) ? ach.emoji : '🔒'}</span>
+                  <span className="font-medium">{ach.name}</span>
+                  <span className="opacity-60">- {ach.description}</span>
+                </div>
               ))}
             </div>
-          )}
-
-          <div className="flex gap-2">
-            <button onClick={aiSummarize} disabled={aiLoading}
-              className="flex-1 px-3 py-2 rounded-lg bg-[rgba(167,139,250,0.12)] text-[#a78bfa] border border-[rgba(167,139,250,0.3)] text-[10px] font-bold hover:bg-[rgba(167,139,250,0.2)] transition-all disabled:opacity-50">
-              📋 ملخص
-            </button>
-            <button onClick={aiSuggestLinks} disabled={aiLoading}
-              className="flex-1 px-3 py-2 rounded-lg bg-[rgba(255,107,157,0.12)] text-[#ff6b9d] border border-[rgba(255,107,157,0.3)] text-[10px] font-bold hover:bg-[rgba(255,107,157,0.2)] transition-all disabled:opacity-50">
-              🔗 اقترح روابط
-            </button>
           </div>
-
-          {/* Ask AI */}
-          <div className="flex gap-2">
-            <input
-              value={aiQuestion}
-              onChange={e => setAiQuestion(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && aiAsk()}
-              placeholder="اسأل العقل..."
-              className="flex-1 bg-white/[0.05] border border-white/10 rounded-lg px-3 py-1.5 text-white text-xs outline-none focus:border-[#a78bfa]/40 placeholder:text-white/20"
-              dir="rtl"
-            />
-            <button onClick={aiAsk} disabled={aiLoading}
-              className="px-3 py-1.5 rounded-lg bg-[#a78bfa] text-black text-[10px] font-bold hover:bg-[#a78bfa]/80 transition-all disabled:opacity-50">
-              اسأل
-            </button>
+          <div className="mt-3 pt-3 border-t border-white/10 flex gap-1 flex-wrap">
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={exportPNG}>📷 PNG</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={exportJSON}>💾 JSON</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={importJSON}>📂 استيراد</Button>
           </div>
+        </div>
+      )}
 
-          {aiAnswer && (
-            <div className="bg-[rgba(0,255,224,0.08)] border border-[rgba(0,255,224,0.15)] rounded-lg p-3">
-              <p className="text-white/60 text-xs leading-relaxed">{aiAnswer}</p>
+      {/* ─── AI Panel ─────────────────────────────────── */}
+      {aiPanelOpen && (
+        <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 w-96 max-w-[90vw] rounded-xl border p-4 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
+          <div className="flex justify-between items-center mb-3">
+            <h3 className="text-sm font-bold">🤖 العقل الذكي</h3>
+            <button onClick={() => setAiPanelOpen(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
+          </div>
+          <div className="space-y-2">
+            <div className="flex gap-1 flex-wrap">
+              <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={aiSummarize} disabled={aiLoading}>📋 ملخص</Button>
+              <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={aiSuggestLinks} disabled={aiLoading}>🔗 اقتراح روابط</Button>
+              <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={generateLearningPath} disabled={aiLoading}>🎓 مسار تعلمي</Button>
+              <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={autoLearn} disabled={autoLearnLoading}>🧠 تعلّم ذاتي</Button>
+              <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => setAutoLearnActive(prev => !prev)}>
+                {autoLearnActive ? '⏹️ إيقاف تلقائي' : '🔄 تلقائي (2د)'}
+              </Button>
             </div>
+            {aiLoading && <div className="text-xs text-center py-2 animate-pulse">⏳ جاري التفكير...</div>}
+            {aiInsight && (
+              <div className={`p-2 rounded-lg text-xs ${theme === 'dark' ? 'bg-purple-900/20' : 'bg-purple-50'}`}>
+                <p className="mb-1">{aiInsight.summary}</p>
+                {aiInsight.questions.length > 0 && (
+                  <div className="space-y-1 mt-2">
+                    {aiInsight.questions.map((q, i) => <p key={i} className="opacity-70">❓ {q}</p>)}
+                  </div>
+                )}
+              </div>
+            )}
+            {learningPath.length > 0 && (
+              <div className={`p-2 rounded-lg text-xs ${theme === 'dark' ? 'bg-green-900/20' : 'bg-green-50'}`}>
+                <p className="font-bold mb-1">🎓 المسار التعليمي:</p>
+                {learningPath.map((step, i) => <p key={i}>{i + 1}. {step}</p>)}
+              </div>
+            )}
+            {autoLearnInsights.length > 0 && (
+              <div className={`p-2 rounded-lg text-xs ${theme === 'dark' ? 'bg-cyan-900/20' : 'bg-cyan-50'}`}>
+                <p className="font-bold mb-1">💡 رؤى:</p>
+                {autoLearnInsights.map((ins, i) => <p key={i}>• {ins}</p>)}
+              </div>
+            )}
+            {/* Ask AI */}
+            <div className="flex gap-1">
+              <Input value={aiQuestion} onChange={e => setAiQuestion(e.target.value)} placeholder="اسأل العقل..." className="h-7 text-xs flex-1" onKeyDown={e => { if (e.key === 'Enter') aiAsk(); }} />
+              <Button size="sm" className="h-7 text-xs" onClick={aiAsk} disabled={aiLoading}>اسأل</Button>
+            </div>
+            {aiAnswer && <div className={`p-2 rounded-lg text-xs ${theme === 'dark' ? 'bg-blue-900/20' : 'bg-blue-50'}`}>{aiAnswer}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* ─── Selected Node Panel ──────────────────────── */}
+      {selectedNode && !selectedNode.isBrain && !selectedNode.isProject && (
+        <div className={`absolute bottom-20 left-1/2 -translate-x-1/2 z-30 w-80 max-w-[90vw] rounded-xl border p-3 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="text-sm font-bold" style={{ color: selectedNode.color }}>{selectedNode.label}</h3>
+            <button onClick={() => setSelectedNode(null)} className="text-xs opacity-50 hover:opacity-100">✕</button>
+          </div>
+          <p className="text-[10px] opacity-70 mb-2">{selectedNode.summary}</p>
+          <div className="flex gap-1 flex-wrap text-[10px] mb-2">
+            <span className="opacity-50">{getMaturityEmoji(selectedNode.maturity)} {selectedNode.tag}</span>
+            <span className="opacity-50">| معرفة: {selectedNode.knowledgeLevel}%</span>
+            <span className="opacity-50">| زيارات: {selectedNode.visitCount}</span>
+            {selectedNode.dormant && <span className="text-red-400">💤 نائم</span>}
+          </div>
+          <div className="flex gap-1 flex-wrap">
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => feedBrain(selectedNode.id)}>🍎 غذّ</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => { setConnectMode(true); setConnectFrom(selectedNode.id); }}>🔗 ربط</Button>
+            {selectedNode.hasChildren && <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => expandNode(selectedNode.id)}>{selectedNode.expanded ? '📂 أغلق' : '📂 توسع'}</Button>}
+            {selectedNode.dormant && <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => wakeNode(selectedNode.id)}>⚡ أيقظ</Button>}
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => aiGenerateNodes(selectedNode)} disabled={aiLoading}>🤖 ولّد</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-400" onClick={() => deleteNode(selectedNode.id)}>🗑️</Button>
+          </div>
+          {connectMode && connectFrom === selectedNode.id && (
+            <p className="text-[10px] text-cyan-400 mt-1 animate-pulse">🔗 انقر على عقدة أخرى للربط...</p>
           )}
         </div>
       )}
 
-      {/* ═══ SELECTED NODE PANEL ═══ */}
-      {selectedNode && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 w-[360px] max-w-[90vw] bg-[rgba(10,10,20,0.95)] backdrop-blur-xl border border-white/10 rounded-xl p-4 max-h-[60vh] overflow-y-auto" dir="rtl">
-          <div className="flex items-start justify-between mb-2">
+      {/* ─── Project Panel ────────────────────────────── */}
+      {projectPanelNode && projectPanelNode.isProject && (
+        <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 w-96 max-w-[90vw] rounded-xl border p-4 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
+          <div className="flex justify-between items-center mb-3">
+            <h3 className="text-sm font-bold">🚀 {projectPanelNode.label}</h3>
+            <button onClick={() => setProjectPanelNode(null)} className="text-xs opacity-50 hover:opacity-100">✕</button>
+          </div>
+          <p className="text-xs opacity-70 mb-2">{projectPanelNode.summary}</p>
+          <div className="flex gap-2 text-[10px] mb-2">
+            <span>المرحلة: <b>{projectPanelNode.projectPhase}</b></span>
+            <span>التقدم: <b>{projectPanelNode.projectProgress}%</b></span>
+          </div>
+          <div className="w-full h-2 rounded-full bg-white/10 mb-3">
+            <div className="h-full rounded-full transition-all" style={{ width: `${projectPanelNode.projectProgress}%`, background: projectPanelNode.projectProgress === 100 ? '#34d399' : '#f59e0b' }} />
+          </div>
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {projectPanelNode.projectTasks.map(task => (
+              <div key={task.id} className={`flex items-center justify-between p-1.5 rounded text-xs ${task.status === 'done' ? 'opacity-50 line-through' : ''}`}>
+                <span>{task.status === 'done' ? '✅' : task.status === 'in-progress' ? '🔄' : '⏳'} {task.label}</span>
+                {task.status !== 'done' && (
+                  <Button size="sm" variant="outline" className="h-5 text-[9px] px-1.5" disabled={taskExecuting === task.id}
+                    onClick={() => executeTask(task.id, task.label, projectPanelNode.id)}>
+                    {taskExecuting === task.id ? '⏳' : '▶️'} نفّذ
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ─── Quiz Panel ───────────────────────────────── */}
+      {quizOpen && (
+        <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 w-96 max-w-[90vw] rounded-xl border p-4 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
+          <div className="flex justify-between items-center mb-3">
+            <h3 className="text-sm font-bold">🎓 اختبار المعرفة</h3>
+            <button onClick={() => setQuizOpen(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
+          </div>
+          {quizLoading ? (
+            <div className="text-center py-4 animate-pulse text-xs">⏳ جاري توليد السؤال...</div>
+          ) : currentQuiz ? (
             <div>
-              <h3 className="font-bold text-sm" style={{ fontFamily: 'Syne, sans-serif', color: selectedNode.isBrain ? '#f5c400' : selectedNode.isCustom ? '#ff6b9d' : selectedNode.color }}>
-                {selectedNode.isBrain ? '🧠' : getMaturityEmoji(selectedNode.maturity)} {selectedNode.label}
-                {selectedNode.dormant && ' 💤'}
-              </h3>
-              <div className="flex items-center gap-1.5 mt-1">
-                <Badge variant="outline" className="text-[10px]" style={{ color: selectedNode.color, borderColor: selectedNode.color + '40' }}>{selectedNode.tag}</Badge>
-                <Badge variant="outline" className="text-[10px]" style={{ color: getMaturityColor(selectedNode.maturity), borderColor: getMaturityColor(selectedNode.maturity) + '40' }}>
-                  {MATURITY_LEVELS[selectedNode.maturity].name}
-                </Badge>
+              <p className="text-sm font-medium mb-3">{currentQuiz.question}</p>
+              <div className="space-y-1.5">
+                {currentQuiz.options.map((opt, i) => (
+                  <button key={i} className={`w-full text-right p-2 rounded-lg border text-xs transition-all ${
+                    quizAnswer === i
+                      ? quizResult === 'correct' && i === currentQuiz.correctIndex ? 'bg-green-900/30 border-green-500'
+                        : quizResult === 'wrong' && i === currentQuiz.correctIndex ? 'bg-green-900/30 border-green-500'
+                        : 'bg-red-900/30 border-red-500'
+                      : 'border-white/10 hover:bg-white/5'
+                  }`} onClick={() => answerQuiz(i)} disabled={quizResult !== null}>
+                    {String.fromCharCode(1571 + i)} - {opt}
+                  </button>
+                ))}
               </div>
-            </div>
-            <button onClick={() => setSelectedNode(null)} className="text-white/30 hover:text-white/60 text-lg leading-none">×</button>
-          </div>
-
-          {selectedNode.summary && <p className="text-white/50 text-xs mb-3 leading-relaxed">{selectedNode.summary}</p>}
-
-          {/* Knowledge + Maturity */}
-          {!selectedNode.isBrain && (
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              <div>
-                <div className="flex justify-between text-[10px] text-white/30 mb-0.5"><span>المعرفة</span><span>{selectedNode.knowledgeLevel}%</span></div>
-                <div className="h-1.5 bg-white/[0.05] rounded-full overflow-hidden">
-                  <div className="h-full rounded-full transition-all" style={{ width: `${selectedNode.knowledgeLevel}%`, background: selectedNode.color }} />
+              {quizResult && (
+                <div className={`mt-3 p-2 rounded-lg text-xs ${quizResult === 'correct' ? 'bg-green-900/20 text-green-400' : 'bg-red-900/20 text-red-400'}`}>
+                  {quizResult === 'correct' ? '🎉 صحيح! +2x تغذية' : '❌ خطأ!'}
+                  {currentQuiz.explanation && <p className="mt-1 opacity-70">{currentQuiz.explanation}</p>}
                 </div>
-              </div>
-              <div>
-                <div className="flex justify-between text-[10px] text-white/30 mb-0.5"><span>النضج</span><span>{selectedNode.visitCount} زيارة</span></div>
-                <div className="h-1.5 bg-white/[0.05] rounded-full overflow-hidden">
-                  <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(100, selectedNode.visitCount / 15 * 100)}%`, background: getMaturityColor(selectedNode.maturity) }} />
-                </div>
+              )}
+              {quizResult && (
+                <Button size="sm" className="mt-2 w-full h-7 text-xs" onClick={generateQuiz}>سؤال آخر</Button>
+              )}
+              <div className="mt-2 text-[10px] opacity-50 text-center">
+                صحيح: {brainStats.quizCorrect}/{brainStats.quizTotal}
               </div>
             </div>
-          )}
+          ) : null}
+        </div>
+      )}
 
-          {/* Actions */}
-          <div className="flex gap-1.5 flex-wrap">
-            {!selectedNode.isBrain && (
-              <button onClick={() => feedBrain(selectedNode.id)}
-                className="px-3 py-1.5 rounded-lg bg-[rgba(245,196,0,0.12)] text-[#f5c400] border border-[rgba(245,196,0,0.3)] text-[10px] font-bold hover:bg-[rgba(245,196,0,0.2)] transition-all">
-                🍎 أطعم العقل
-              </button>
-            )}
-            {selectedNode.hasChildren && (
-              <button onClick={() => expandNode(selectedNode.id)}
-                className="px-3 py-1.5 rounded-lg bg-[rgba(0,255,224,0.12)] text-[#00ffe0] border border-[rgba(0,255,224,0.3)] text-[10px] font-bold hover:bg-[rgba(0,255,224,0.2)] transition-all">
-                {selectedNode.expanded ? '↺ أغلق' : '⊕ توسع'}
-              </button>
-            )}
-            {!selectedNode.isBrain && (
-              <button onClick={() => {
-                if (connectMode && connectFrom === selectedNode.id) { setConnectMode(false); setConnectFrom(null); }
-                else { setConnectMode(true); setConnectFrom(selectedNode.id); }
-              }}
-                className={`px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all ${connectMode && connectFrom === selectedNode.id ? 'bg-[rgba(255,107,157,0.2)] text-[#ff6b9d] border border-[rgba(255,107,157,0.4)]' : 'bg-white/[0.04] text-white/50 border border-white/10 hover:text-[#ff6b9d]'}`}>
-                🔗 ربط
-              </button>
-            )}
-            {!selectedNode.isBrain && (
-              <button onClick={() => aiGenerateNodes(selectedNode)} disabled={aiLoading}
-                className="px-3 py-1.5 rounded-lg bg-[rgba(167,139,250,0.12)] text-[#a78bfa] border border-[rgba(167,139,250,0.3)] text-[10px] font-bold hover:bg-[rgba(167,139,250,0.2)] transition-all disabled:opacity-50">
-                🤖 ولّد عقد
-              </button>
-            )}
-            {!selectedNode.isBrain && selectedNode.knowledgeLevel >= 30 && selectedNode.connections.length >= 2 && (
-              <button onClick={() => {
-                const otherConnected = selectedNode.connections.filter(id => id !== BRAIN_ID);
-                if (otherConnected.length >= 1) formAlliance(selectedNode.id, otherConnected[0]);
-              }}
-                className="px-3 py-1.5 rounded-lg bg-[rgba(245,196,0,0.12)] text-[#f5c400] border border-[rgba(245,196,0,0.3)] text-[10px] font-bold hover:bg-[rgba(245,196,0,0.2)] transition-all">
-                🤝 تحالف
-              </button>
-            )}
-            {selectedNode.dormant && (
-              <button onClick={() => wakeNode(selectedNode.id)}
-                className="px-3 py-1.5 rounded-lg bg-[rgba(52,211,153,0.12)] text-[#34d399] border border-[rgba(52,211,153,0.3)] text-[10px] font-bold hover:bg-[rgba(52,211,153,0.2)] transition-all">
-                ⚡ أيقظ
-              </button>
-            )}
-            {!selectedNode.isBrain && (
-              <button onClick={() => deleteNode(selectedNode.id)}
-                className="px-2 py-1.5 rounded-lg bg-white/[0.04] text-white/30 border border-white/10 text-[10px] hover:text-red-400 hover:border-red-400/30 transition-all">
-                ✕
-              </button>
-            )}
+      {/* ─── Filter Panel ─────────────────────────────── */}
+      {showFilterPanel && (
+        <div className={`absolute top-14 left-4 z-30 w-56 rounded-xl border p-3 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="text-xs font-bold">🔍 تصفية</h3>
+            <button onClick={() => setShowFilterPanel(false)} className="text-xs opacity-50 hover:opacity-100">✕</button>
           </div>
-
-          {/* Connections */}
-          {selectedNode.connections.length > 0 && (
-            <div className="mt-3 pt-2 border-t border-white/[0.06]">
-              <div className="text-white/30 text-[10px] mb-1">متصل بـ ({selectedNode.connections.length})</div>
-              <div className="flex flex-wrap gap-1">
-                {selectedNode.connections.map(cid => {
-                  const c = nodes.find(n => n.id === cid);
-                  return c ? <span key={cid} className="text-[9px] px-2 py-0.5 rounded-full bg-white/[0.04] text-white/40 border border-white/[0.06]">{c.label}</span> : null;
-                })}
+          <div className="space-y-2 text-[10px]">
+            <div>
+              <label className="block mb-1 opacity-70">وضع العرض</label>
+              <div className="flex gap-1">
+                {(['normal', 'heatmap', 'filtered'] as ViewMode[]).map(m => (
+                  <button key={m} className={`px-2 py-0.5 rounded text-[10px] ${viewMode === m ? 'bg-cyan-600 text-white' : 'bg-white/5'}`} onClick={() => setViewMode(m)}>{m === 'normal' ? 'عادي' : m === 'heatmap' ? 'حراري' : 'مصفى'}</button>
+                ))}
               </div>
             </div>
-          )}
-
-          {/* 🧬 Allied nodes */}
-          {selectedNode.alliedWith.length > 0 && (
-            <div className="mt-2 pt-2 border-t border-white/[0.06]">
-              <div className="text-[#a78bfa] text-[10px] mb-1">🤝 متحالف مع</div>
-              <div className="flex flex-wrap gap-1">
-                {selectedNode.alliedWith.map(aid => {
-                  const a = nodes.find(n => n.id === aid);
-                  return a ? <span key={aid} className="text-[9px] px-2 py-0.5 rounded-full bg-[rgba(167,139,250,0.08)] text-[#a78bfa] border border-[rgba(167,139,250,0.2)]">{a.label}</span> : null;
-                })}
-              </div>
+            <div>
+              <label className="block mb-1 opacity-70">أقل معرفة: {filterState.minKnowledge}</label>
+              <input type="range" min="0" max="100" value={filterState.minKnowledge} onChange={e => setFilterState(p => ({ ...p, minKnowledge: +e.target.value }))} className="w-full" />
             </div>
-          )}
+            <label className="flex items-center gap-1"><input type="checkbox" checked={filterState.showDormant} onChange={e => setFilterState(p => ({ ...p, showDormant: e.target.checked }))} /> أظهر النائمين</label>
+          </div>
         </div>
       )}
 
-      {/* ═══ CONNECT MODE BANNER ═══ */}
-      {connectMode && connectFrom && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-[rgba(255,107,157,0.15)] backdrop-blur-xl border border-[rgba(255,107,157,0.3)] rounded-full text-[#ff6b9d] text-xs" dir="rtl">
-          🔗 وضع الربط — اضغط على عقدة أخرى
-          <button onClick={() => { setConnectMode(false); setConnectFrom(null); }} className="mr-2 text-white/30 hover:text-white/60">✕</button>
+      {/* ─── Add Node Dialog ──────────────────────────── */}
+      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+        <DialogContent className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
+          <DialogHeader><DialogTitle>➕ إضافة عقدة جديدة</DialogTitle></DialogHeader>
+          <div className="space-y-3 pt-2">
+            <Input value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="اسم العقدة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} />
+            <Input value={newTag} onChange={e => setNewTag(e.target.value)} placeholder="التصنيف (اختياري)" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} />
+            <Textarea value={newSummary} onChange={e => setNewSummary(e.target.value)} placeholder="وصف مختصر (اختياري)" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={2} />
+            <Button className="w-full" onClick={addCustomNode} disabled={!newLabel.trim()}>إضافة</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Idea Dialog ──────────────────────────────── */}
+      <Dialog open={ideaDialogOpen} onOpenChange={setIdeaDialogOpen}>
+        <DialogContent className={theme === 'dark' ? 'bg-gray-900 border-gray-700 text-white' : ''}>
+          <DialogHeader><DialogTitle>💡 حوّل فكرتك إلى مشروع</DialogTitle></DialogHeader>
+          <div className="space-y-3 pt-2">
+            <Textarea value={ideaText} onChange={e => setIdeaText(e.target.value)} placeholder="اكتب فكرتك هنا... وسيتولى الذكاء الاصطناعي تحويلها إلى خطة مشروع مفصلة" className={theme === 'dark' ? 'bg-white/5 border-white/10' : ''} rows={4} />
+            <Button className="w-full" onClick={analyzeIdea} disabled={!ideaText.trim() || ideaLoading}>
+              {ideaLoading ? '⏳ جاري التحليل...' : '🚀 حلّل وأنشئ المشروع'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Achievement Toast ────────────────────────── */}
+      {achievementToast && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 animate-bounce">
+          <div className="px-6 py-3 rounded-xl bg-yellow-500 text-black font-bold text-sm shadow-2xl flex items-center gap-2">
+            <span className="text-2xl">{achievementToast.emoji}</span>
+            <div>
+              <div className="font-bold">{achievementToast.name}</div>
+              <div className="text-xs font-normal opacity-80">{achievementToast.description}</div>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* ═══ FEED ANIMATION ═══ */}
-      {feedAnim && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-[rgba(245,196,0,0.15)] backdrop-blur-xl border border-[rgba(245,196,0,0.3)] rounded-full text-[#f5c400] text-xs animate-bounce" dir="rtl">
-          🍎 العقل يتغذى!
+      {/* ─── Multi-select info ────────────────────────── */}
+      {selectedNodeIds.size > 1 && (
+        <div className={`absolute bottom-20 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-lg text-xs ${theme === 'dark' ? 'bg-cyan-900/50 text-cyan-400' : 'bg-cyan-100 text-cyan-700'}`}>
+          تم تحديد {selectedNodeIds.size} عقد
+          <Button size="sm" variant="ghost" className="h-5 text-[10px] ml-2 text-red-400" onClick={() => { selectedNodeIds.forEach(id => deleteNode(id)); setSelectedNodeIds(new Set()); }}>🗑️ حذف الكل</Button>
         </div>
       )}
-
-      {/* ═══ BOTTOM HINT ═══ */}
-      <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-40 text-[10px] text-white/20 bg-[rgba(5,5,8,0.75)] backdrop-blur-xl px-4 py-1.5 rounded-full border border-white/[0.06]" dir="rtl">
-        اضغط عقدة · اسحب · عجلة للتكبير · 🤖 AI ذكي · 🔍 بحث · 🕸️ أوضاع عرض
-      </div>
-
-      {/* ═══ BRAIN LEVEL ═══ */}
-      <div className="fixed bottom-3 right-3 z-40 flex items-center gap-2 px-3 py-1.5 bg-[rgba(10,10,20,0.9)] backdrop-blur-xl border border-[rgba(245,196,0,0.2)] rounded-full" dir="rtl">
-        <span className="text-lg">{levelInfo.emoji}</span>
-        <div>
-          <div className="text-[#f5c400] text-[11px] font-bold" style={{ fontFamily: 'Syne, sans-serif' }}>{levelInfo.name}</div>
-          <div className="text-white/20 text-[9px]">مستوى {levelInfo.level}</div>
-        </div>
-      </div>
-
-      {/* ═══ RESET VIEW ═══ */}
-      <button onClick={resetView}
-        className="fixed bottom-3 left-3 z-40 px-3 py-1.5 bg-[rgba(10,10,20,0.9)] backdrop-blur-xl border border-white/10 rounded-full text-white/30 text-xs hover:text-white/60 transition-all">
-        ⟳
-      </button>
     </div>
   );
 }

@@ -4,49 +4,36 @@ import ZAI from 'z-ai-web-dev-sdk';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, nodes, nodeLabel, nodeTag, nodeSummary, brainKnowledge } = body;
-
+    const { action } = body;
     const zai = await ZAI.create();
 
     switch (action) {
       case 'summarize': {
-        // Generate a smart summary of the entire knowledge network
+        const { nodes, brainKnowledge } = body;
         const nodeDescriptions = nodes
-          .filter((n: { isBrain?: boolean; label?: string; tag?: string; summary?: string }) => !n.isBrain)
+          .filter((n: { isBrain?: boolean }) => !n.isBrain)
           .map((n: { label: string; tag: string; summary: string }) => `${n.label} (${n.tag}): ${n.summary}`)
           .join('\n');
 
         const completion = await zai.chat.completions.create({
           messages: [
-            {
-              role: 'system',
-              content: 'أنت عقل معرفي ذكي. قدم تحليلاً مختصراً وعميقاً بالعربية للشبكة المعرفية التالية. اكتب ملخصاً من 3-4 جمل يربط بين المواضيع المختلفة ويكشف أنماطاً خفية. ثم اطرح سؤالين مثيرين للتفكير يربطان بين مواضيع مختلفة في الشبكة.',
-            },
-            {
-              role: 'user',
-              content: `شبكة معرفية تحوي ${nodes.length} عقدة بمستوى معرفة ${brainKnowledge}:\n${nodeDescriptions}`,
-            },
+            { role: 'system', content: 'أنت عقل معرفي ذكي. قدم تحليلاً مختصراً وعميقاً بالعربية للشبكة المعرفية. اكتب ملخصاً من 3-4 جمل يربط المواضيع ويكشف أنماطاً خفية. ثم اطرح سؤالين مثيرين للتفكير.' },
+            { role: 'user', content: `شبكة معرفية تحوي ${nodes.length} عقدة بمستوى معرفة ${brainKnowledge}:\n${nodeDescriptions}` },
           ],
           temperature: 0.7,
         });
 
-        const responseText = completion.choices[0]?.message?.content || '';
-        const parts = responseText.split('سؤال');
+        const text = completion.choices[0]?.message?.content || '';
+        const parts = text.split(/سؤال\s*\d*[.:]/);
         const summary = parts[0]?.trim() || '';
-        const questions = [];
-        if (parts.length > 1) {
-          questions.push(...parts.slice(1).map(q => 'سؤال' + q.trim()).filter(q => q.length > 5));
-        }
-        if (questions.length === 0) {
-          questions.push('كيف ترتبط هذه المواضيع ببعضها البعض؟');
-          questions.push('ما هو المفهوم المشترك الخفي بين هذه العقد؟');
-        }
+        const questions = parts.slice(1).map(q => q.trim()).filter(q => q.length > 5);
+        if (questions.length === 0) { questions.push('كيف ترتبط هذه المواضيع؟'); questions.push('ما المفهوم المشترك الخفي؟'); }
 
         return NextResponse.json({ summary, questions: questions.slice(0, 3) });
       }
 
       case 'suggest-links': {
-        // Suggest hidden connections between nodes
+        const { nodes } = body;
         const nodeList = nodes
           .filter((n: { isBrain?: boolean }) => !n.isBrain)
           .map((n: { id: string; label: string; tag: string; summary: string }) => `ID:${n.id} | ${n.label} (${n.tag}): ${n.summary}`)
@@ -54,62 +41,36 @@ export async function POST(req: NextRequest) {
 
         const completion = await zai.chat.completions.create({
           messages: [
-            {
-              role: 'system',
-              content: 'أنت محلل شبكات معرفية. بناءً على العقد التالية، اقترح 3 روابط خفية بين عقد لا تبدو مرتبطة ظاهرياً. لكل رابط، اكتب: from_id, to_id, reason. أجب بصيغة JSON فقط: {"links":[{"from":"id","to":"id","reason":"السبب"}]}',
-            },
-            {
-              role: 'user',
-              content: nodeList,
-            },
+            { role: 'system', content: 'أنت محلل شبكات معرفية. اقترح 3 روابط خفية بين عقد لا تبدو مرتبطة. أجب بصيغة JSON فقط: {"links":[{"from":"id","to":"id","reason":"السبب"}]}' },
+            { role: 'user', content: nodeList },
           ],
           temperature: 0.8,
         });
 
         let links = [];
-        try {
-          const text = completion.choices[0]?.message?.content || '';
-          const jsonMatch = text.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            links = parsed.links || [];
-          }
-        } catch {}
+        try { const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/); if (m) links = JSON.parse(m[0]).links || []; } catch {}
 
         return NextResponse.json({ suggestedLinks: links });
       }
 
       case 'generate-nodes': {
-        // Generate new sub-nodes for a topic
+        const { nodeLabel, nodeTag, nodeSummary } = body;
         const completion = await zai.chat.completions.create({
           messages: [
-            {
-              role: 'system',
-              content: 'أنت مولد معرفة. بناءً على الموضوع التالي، اقترح 4 عقد فرعية جديدة مفيدة ومثيرة. لكل عقدة اكتب: label, tag, summary. أجب بصيغة JSON فقط: {"nodes":[{"label":"الاسم","tag":"التصنيف","summary":"الوصف"}]}',
-            },
-            {
-              role: 'user',
-              content: `الموضوع: ${nodeLabel} (${nodeTag})\nالوصف: ${nodeSummary}`,
-            },
+            { role: 'system', content: 'أنت مولد معرفة. اقترح 4 عقد فرعية جديدة. أجب بصيغة JSON فقط: {"nodes":[{"label":"الاسم","tag":"التصنيف","summary":"الوصف"}]}' },
+            { role: 'user', content: `الموضوع: ${nodeLabel} (${nodeTag})\nالوصف: ${nodeSummary}` },
           ],
           temperature: 0.8,
         });
 
         let newNodes = [];
-        try {
-          const text = completion.choices[0]?.message?.content || '';
-          const jsonMatch = text.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            newNodes = parsed.nodes || [];
-          }
-        } catch {}
+        try { const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/); if (m) newNodes = JSON.parse(m[0]).nodes || []; } catch {}
 
         return NextResponse.json({ suggestedNodes: newNodes });
       }
 
       case 'ask': {
-        // Answer a question about the knowledge network
+        const { nodes, question } = body;
         const nodeDescriptions = nodes
           .filter((n: { isBrain?: boolean }) => !n.isBrain)
           .map((n: { label: string; summary: string }) => `${n.label}: ${n.summary}`)
@@ -117,20 +78,138 @@ export async function POST(req: NextRequest) {
 
         const completion = await zai.chat.completions.create({
           messages: [
-            {
-              role: 'system',
-              content: 'أنت عقل معرفي ذكي. أجب على السؤال التالي بناءً على المعرفة المتاحة في الشبكة. كن مختصراً (3-4 جمل) وعميقاً.',
-            },
-            {
-              role: 'user',
-              content: `المعرفة المتاحة:\n${nodeDescriptions}\n\nالسؤال: ${body.question}`,
-            },
+            { role: 'system', content: 'أنت عقل معرفي ذكي. أجب على السؤال بناءً على المعرفة المتاحة. كن مختصراً (3-4 جمل) وعميقاً.' },
+            { role: 'user', content: `المعرفة:\n${nodeDescriptions}\n\nالسؤال: ${question}` },
           ],
           temperature: 0.6,
         });
 
-        const answer = completion.choices[0]?.message?.content || '';
-        return NextResponse.json({ answer });
+        return NextResponse.json({ answer: completion.choices[0]?.message?.content || '' });
+      }
+
+      // 💡 NEW: Analyze an idea and create a project plan
+      case 'analyze-idea': {
+        const { idea } = body;
+        const completion = await zai.chat.completions.create({
+          messages: [
+            {
+              role: 'system',
+              content: `أنت محلل مشاريع ذكي. حوّل الفكرة التالية إلى خطة مشروع مفصلة. أجب بصيغة JSON فقط بهذا الشكل:
+{
+  "title": "اسم المشروع",
+  "description": "وصف مختصر",
+  "phases": [
+    {
+      "name": "اسم المرحلة",
+      "description": "وصف المرحلة",
+      "tasks": [
+        {"label": "اسم المهمة", "description": "وصف المهمة"}
+      ]
+    }
+  ],
+  "tags": ["تصنيف1", "تصنيف2"],
+  "estimatedNodes": 10
+}
+اجعل المشروع واقعياً وقابلاً للتنفيذ. 3-5 مراحل لكل منها 2-4 مهام. كل شيء بالعربية.`,
+            },
+            { role: 'user', content: `الفكرة: ${idea}` },
+          ],
+          temperature: 0.7,
+        });
+
+        let analysis = null;
+        try {
+          const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/);
+          if (m) analysis = JSON.parse(m[0]);
+        } catch {}
+
+        return NextResponse.json({ analysis });
+      }
+
+      // 💡 NEW: Execute a project task
+      case 'execute-task': {
+        const { taskLabel, taskDescription, projectContext } = body;
+        const completion = await zai.chat.completions.create({
+          messages: [
+            {
+              role: 'system',
+              content: 'أنت منفذ مهام ذكي. نفذ المهمة التالية وقدم نتيجة مفصلة بالعربية (3-5 جمل). اشرح ما تم إنجازه والخطوات التالية.',
+            },
+            { role: 'user', content: `المشروع: ${projectContext}\nالمهمة: ${taskLabel}\nالوصف: ${taskDescription}` },
+          ],
+          temperature: 0.6,
+        });
+
+        return NextResponse.json({ result: completion.choices[0]?.message?.content || '' });
+      }
+
+      // 🎓 NEW: Generate quiz questions
+      case 'generate-quiz': {
+        const { nodes } = body;
+        const nodeDescriptions = nodes
+          .filter((n: { isBrain?: boolean }) => !n.isBrain)
+          .map((n: { label: string; tag: string; summary: string }) => `${n.label} (${n.tag}): ${n.summary}`)
+          .join('\n');
+
+        const completion = await zai.chat.completions.create({
+          messages: [
+            {
+              role: 'system',
+              content: `أنت معلّم ذكي. بناءً على المعرفة التالية، أنشئ سؤال اختيار من متعدد. أجب بصيغة JSON فقط:
+{
+  "question": "السؤال",
+  "options": ["خيار1", "خيار2", "خيار3", "خيار4"],
+  "correctIndex": 0,
+  "explanation": "شرح الإجابة الصحيحة"
+}
+اجعل الأسئلة مثيرة وتربط بين مواضيع مختلفة. كل شيء بالعربية.`,
+            },
+            { role: 'user', content: nodeDescriptions },
+          ],
+          temperature: 0.8,
+        });
+
+        let quiz = null;
+        try {
+          const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/);
+          if (m) quiz = JSON.parse(m[0]);
+        } catch {}
+
+        return NextResponse.json({ quiz });
+      }
+
+      // 🧠 NEW: Auto-learn - analyze gaps and suggest new knowledge
+      case 'auto-learn': {
+        const { nodes, brainKnowledge } = body;
+        const nodeDescriptions = nodes
+          .filter((n: { isBrain?: boolean }) => !n.isBrain)
+          .map((n: { label: string; tag: string; summary: string }) => `${n.label} (${n.tag}): ${n.summary}`)
+          .join('\n');
+
+        const completion = await zai.chat.completions.create({
+          messages: [
+            {
+              role: 'system',
+              content: `أنت محلل معرفي ذكي. حلل الشبكة المعرفية التالية واكتشف الفجوات — ما المعرفة الناقصة؟ اقترح عقد جديدة وروابط تثري الشبكة. أجب بصيغة JSON فقط:
+{
+  "newNodes": [{"label": "اسم العقدة", "tag": "التصنيف", "summary": "الوصف"}],
+  "newLinks": [{"fromLabel": "اسم عقدة موجودة", "toLabel": "اسم عقدة موجودة أو جديدة", "reason": "السبب"}],
+  "insights": ["رؤية 1", "رؤية 2"]
+}
+3-5 عقد جديدة و 2-3 روابط و 2 رؤى. كل شيء بالعربية.`,
+            },
+            { role: 'user', content: `الشبكة (معرفة: ${brainKnowledge}):\n${nodeDescriptions || 'الشبكة فارغة'}` },
+          ],
+          temperature: 0.8,
+        });
+
+        let result = { newNodes: [], newLinks: [], insights: [] };
+        try {
+          const m = completion.choices[0]?.message?.content?.match(/\{[\s\S]*\}/);
+          if (m) result = JSON.parse(m[0]);
+        } catch {}
+
+        return NextResponse.json(result);
       }
 
       default:
@@ -138,9 +217,6 @@ export async function POST(req: NextRequest) {
     }
   } catch (error) {
     console.error('Brain API error:', error);
-    return NextResponse.json(
-      { error: 'Failed to process AI request', summary: '', questions: [] },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed' }, { status: 500 });
   }
 }
