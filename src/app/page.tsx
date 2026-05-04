@@ -175,6 +175,9 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
   const liveProject = nodes.find(n => n.id === projectNode.id) || projectNode;
   // Get child nodes (phases/tasks) for navigation
   const childNodes = nodes.filter(n => n.parentId === liveProject.id);
+  const tasks = liveProject.projectTasks || [];
+  const progress = liveProject.projectProgress ?? 0;
+  const phase = liveProject.projectPhase || 'idea';
 
   const phaseLabels: Record<string, string> = {
     idea: 'فكرة', analysis: 'تحليل', planning: 'تخطيط', execution: 'تنفيذ', done: 'مكتمل ✅',
@@ -183,21 +186,21 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
   return (
     <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 w-96 max-w-[90vw] rounded-xl border p-4 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
       <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-bold">🚀 {liveProject.label}</h3>
+        <h3 className="text-sm font-bold">🚀 {liveProject.label || 'مشروع'}</h3>
         <button onClick={onClose} className="text-xs opacity-50 hover:opacity-100">✕</button>
       </div>
-      <p className="text-xs opacity-70 mb-2">{liveProject.summary}</p>
+      {liveProject.summary && <p className="text-xs opacity-70 mb-2">{liveProject.summary}</p>}
       <div className="flex gap-2 text-[10px] mb-2">
-        <span>المرحلة: <b>{phaseLabels[liveProject.projectPhase] || liveProject.projectPhase}</b></span>
-        <span>التقدم: <b>{liveProject.projectProgress}%</b></span>
+        <span>المرحلة: <b>{phaseLabels[phase] || phase}</b></span>
+        <span>التقدم: <b>{progress}%</b></span>
       </div>
       <div className="w-full h-2 rounded-full bg-white/10 mb-3">
-        <div className="h-full rounded-full transition-all" style={{ width: `${liveProject.projectProgress}%`, background: liveProject.projectProgress === 100 ? '#34d399' : '#f59e0b' }} />
+        <div className="h-full rounded-full transition-all" style={{ width: `${progress}%`, background: progress === 100 ? '#34d399' : '#f59e0b' }} />
       </div>
-      {liveProject.projectTasks.length > 0 && (
+      {tasks.length > 0 && (
         <div className="space-y-1 max-h-48 overflow-y-auto mb-3">
           <p className="text-[10px] font-bold opacity-60 mb-1">📋 المهام:</p>
-          {liveProject.projectTasks.map(task => (
+          {tasks.map(task => (
             <div key={task.id} className={`flex items-center justify-between p-1.5 rounded text-xs ${task.status === 'done' ? 'opacity-50 line-through' : ''}`}>
               <span>{task.status === 'done' ? '✅' : task.status === 'in-progress' ? '🔄' : '⏳'} {task.label}</span>
               {task.status !== 'done' && (
@@ -1627,7 +1630,7 @@ export default function MindFlowBrain() {
 
       if (dragRef.current.nodeId) {
         const dx = sx - dragRef.current.startX; const dy = sy - dragRef.current.startY;
-        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) dragRef.current.moved = true;
+        if (Math.abs(dx) > 15 || Math.abs(dy) > 15) dragRef.current.moved = true;
         if (dragRef.current.moved) {
           const vp = viewportRef.current;
           setNodes(prev => prev.map(n => n.id === dragRef.current.nodeId ? { ...n, x: dragRef.current.nodeStartX + dx / vp.scale, y: dragRef.current.nodeStartY + dy / vp.scale } : n));
@@ -1673,16 +1676,21 @@ export default function MindFlowBrain() {
               setConnectMode(false); setConnectFrom(null);
             }
           } else {
-            setSelectedNode(hitNode);
+            setSelectedNode({...hitNode});
             setSelectedNodeIds(new Set([hitNode.id]));
-            // Open project panel for project nodes (check isProject flag or tag)
-            if (hitNode.isProject || hitNode.tag === 'مشروع') {
+            // Open project panel for project nodes (check isProject flag, tag, or projectTasks)
+            const isProjectNode = hitNode.isProject || hitNode.tag === 'مشروع' || (hitNode.projectTasks && hitNode.projectTasks.length > 0);
+            if (isProjectNode) {
               // Ensure isProject flag is set for legacy nodes
               if (!hitNode.isProject) {
-                setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true } : n));
+                setNodes(prev => prev.map(n => n.id === hitNode.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
                 hitNode.isProject = true;
+                hitNode.tag = hitNode.tag || 'مشروع';
               }
-              setProjectPanelNode(hitNode);
+              setProjectPanelNode({...hitNode, isProject: true, tag: hitNode.tag || 'مشروع'});
+            } else {
+              // Close project panel if clicking a non-project node
+              setProjectPanelNode(null);
             }
           }
         }
@@ -1718,12 +1726,41 @@ export default function MindFlowBrain() {
       }
     }
 
+    // Backup click handler — ensures node selection works even if pointerup is missed
+    function onClick(e: MouseEvent) {
+      // Only handle if the pointer handlers didn't already process this click
+      // (selectedNode would already be set if they did)
+      const rect = canvas!.getBoundingClientRect();
+      const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
+      const hit = findNodeAt(sx, sy);
+      if (hit && !connectMode) {
+        // Check if the pointerup handler already selected this node
+        // by comparing with current selectedNode (from ref, not state)
+        setSelectedNode(prev => {
+          if (prev && prev.id === hit.id) return prev; // already selected by pointerup
+          // Pointerup didn't fire or didn't select — do it here
+          setSelectedNodeIds(new Set([hit.id]));
+          const isProjectNode = hit.isProject || hit.tag === 'مشروع' || (hit.projectTasks && hit.projectTasks.length > 0);
+          if (isProjectNode) {
+            if (!hit.isProject) {
+              setNodes(nprev => nprev.map(n => n.id === hit.id ? { ...n, isProject: true, tag: n.tag || 'مشروع' } : n));
+            }
+            setProjectPanelNode({...hit, isProject: true, tag: hit.tag || 'مشروع'});
+          } else {
+            setProjectPanelNode(null);
+          }
+          return {...hit};
+        });
+      }
+    }
+
     canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
     canvas.addEventListener('pointermove', onPointerMove, { passive: false });
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('dblclick', onDblClick);
+    canvas.addEventListener('click', onClick);
     // Prevent default touch behaviors (scrolling, zooming) that block interaction
     canvas.addEventListener('touchstart', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
     canvas.addEventListener('touchmove', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
@@ -1734,6 +1771,7 @@ export default function MindFlowBrain() {
       canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('dblclick', onDblClick);
+      canvas.removeEventListener('click', onClick);
     };
   }, [findNodeAt, connectMode, connectFrom, connectNodes, expandNode, feedBrain]);
 
@@ -1940,27 +1978,31 @@ export default function MindFlowBrain() {
         </div>
       )}
 
-      {/* ─── Selected Node Panel (non-project, non-brain) ────── */}
+      {/* ─── Selected Node Panel ────── */}
       {selectedNode && !selectedNode.isBrain && !(selectedNode.isProject || selectedNode.tag === 'مشروع') && (
         <div className={`absolute bottom-20 left-1/2 -translate-x-1/2 z-30 w-80 max-w-[90vw] rounded-xl border p-3 ${theme === 'dark' ? 'bg-gray-900/95 border-gray-700 text-white' : 'bg-white/95 border-gray-200 text-gray-900'}`}>
           <div className="flex justify-between items-center mb-2">
-            <h3 className="text-sm font-bold" style={{ color: selectedNode.color }}>{selectedNode.label}</h3>
+            <h3 className="text-sm font-bold" style={{ color: selectedNode.color || '#00ffe0' }}>{selectedNode.tag || '●'} {selectedNode.label}</h3>
             <button onClick={() => setSelectedNode(null)} className="text-xs opacity-50 hover:opacity-100">✕</button>
           </div>
-          <p className="text-[10px] opacity-70 mb-2">{selectedNode.summary}</p>
+          {selectedNode.summary && <p className="text-[10px] opacity-70 mb-2">{selectedNode.summary}</p>}
           <div className="flex gap-1 flex-wrap text-[10px] mb-2">
-            <span className="opacity-50">{getMaturityEmoji(selectedNode.maturity)} {selectedNode.tag}</span>
-            <span className="opacity-50">| معرفة: {selectedNode.knowledgeLevel}%</span>
-            <span className="opacity-50">| زيارات: {selectedNode.visitCount}</span>
+            <span className="opacity-50">{getMaturityEmoji(selectedNode.maturity || 'seed')} {selectedNode.tag || 'عقدة'}</span>
+            <span className="opacity-50">| معرفة: {selectedNode.knowledgeLevel ?? 0}%</span>
+            <span className="opacity-50">| زيارات: {selectedNode.visitCount ?? 0}</span>
             {selectedNode.dormant && <span className="text-red-400">💤 نائم</span>}
           </div>
+          {/* Knowledge progress bar */}
+          <div className="w-full h-1.5 rounded-full bg-white/10 mb-2">
+            <div className="h-full rounded-full transition-all" style={{ width: `${selectedNode.knowledgeLevel ?? 0}%`, background: `linear-gradient(90deg, ${selectedNode.color || '#00ffe0'}, ${selectedNode.color || '#00ffe0'}88)` }} />
+          </div>
           <div className="flex gap-1 flex-wrap">
-            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => feedBrain(selectedNode.id)}>🍎 غذّ</Button>
+            {!selectedNode.isBrain && <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => feedBrain(selectedNode.id)}>🍎 غذّ</Button>}
             <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => { setConnectMode(true); setConnectFrom(selectedNode.id); }}>🔗 ربط</Button>
             {selectedNode.hasChildren && <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => expandNode(selectedNode.id)}>{selectedNode.expanded ? '📂 أغلق' : '📂 توسع'}</Button>}
             {selectedNode.dormant && <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => wakeNode(selectedNode.id)}>⚡ أيقظ</Button>}
             <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => aiGenerateNodes(selectedNode)} disabled={aiLoading}>🤖 ولّد</Button>
-            <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-400" onClick={() => deleteNode(selectedNode.id)}>🗑️</Button>
+            {!selectedNode.isBrain && <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-400" onClick={() => deleteNode(selectedNode.id)}>🗑️</Button>}
           </div>
           {connectMode && connectFrom === selectedNode.id && (
             <p className="text-[10px] text-cyan-400 mt-1 animate-pulse">🔗 انقر على عقدة أخرى للربط...</p>
@@ -1968,8 +2010,35 @@ export default function MindFlowBrain() {
         </div>
       )}
 
+      {/* ─── Brain Node Panel ────── */}
+      {selectedNode && selectedNode.isBrain && (
+        <div className={`absolute bottom-20 left-1/2 -translate-x-1/2 z-30 w-80 max-w-[90vw] rounded-xl border p-3 ${theme === 'dark' ? 'bg-gray-900/95 border-yellow-900/50 text-white' : 'bg-white/95 border-yellow-200 text-gray-900'}`}>
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="text-sm font-bold text-yellow-400">🧠 العقل المركزي</h3>
+            <button onClick={() => setSelectedNode(null)} className="text-xs opacity-50 hover:opacity-100">✕</button>
+          </div>
+          <p className="text-[10px] opacity-70 mb-2">العقل المركزي — يتغذى ويتعلم من كل عقدة تتصل به</p>
+          <div className="grid grid-cols-2 gap-1 text-[10px] mb-2">
+            <span className="opacity-60">📊 المعرفة: <b className="text-yellow-400">{brainStats.totalKnowledge}</b></span>
+            <span className="opacity-60">📈 المستوى: <b className="text-yellow-400">{brainStats.level} ({brainStats.levelName})</b></span>
+            <span className="opacity-60">🔗 العقد: <b>{brainStats.totalNodes}</b></span>
+            <span className="opacity-60">🍼 التغذيات: <b>{brainStats.totalFeeds}</b></span>
+            <span className="opacity-60">🌐 الروابط: <b>{brainStats.totalConnections}</b></span>
+            <span className="opacity-60">🚀 المشاريع: <b>{brainStats.projectsCreated}</b></span>
+          </div>
+          <div className="w-full h-2 rounded-full bg-white/10 mb-2">
+            <div className="h-full rounded-full bg-gradient-to-r from-yellow-600 to-yellow-400 transition-all" style={{ width: `${Math.min(100, brainStats.totalKnowledge / 10)}%` }} />
+          </div>
+          <div className="flex gap-1 flex-wrap">
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={aiSummarize} disabled={aiLoading}>🤖 ملخص ذكي</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={aiSuggestLinks} disabled={aiLoading}>🔗 اقترح روابط</Button>
+            <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={() => setShowStats(true)}>📊 تفاصيل</Button>
+          </div>
+        </div>
+      )}
+
       {/* ─── Project Panel ────────────────────────────── */}
-      {projectPanelNode && (projectPanelNode.isProject || projectPanelNode.tag === 'مشروع') && (
+      {projectPanelNode && (projectPanelNode.isProject || projectPanelNode.tag === 'مشروع' || (projectPanelNode.projectTasks && projectPanelNode.projectTasks.length > 0)) && (
         <ProjectPanel
           projectNode={projectPanelNode}
           nodes={nodes}
