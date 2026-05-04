@@ -321,9 +321,12 @@ export default function MindFlowBrain() {
     const vp = viewportRef.current;
     const wx = (sx - vp.x) / vp.scale;
     const wy = (sy - vp.y) / vp.scale;
+    // Larger hit areas for mobile/touch friendliness
+    const isTouchDevice = 'ontouchstart' in window;
+    const touchBonus = isTouchDevice ? 20 : 0;
     for (let i = nodesRef.current.length - 1; i >= 0; i--) {
       const n = nodesRef.current[i];
-      const r = n.isBrain ? 55 : n.isProject ? 45 : 32;
+      const r = (n.isBrain ? 55 : n.isProject ? 45 : 32) + touchBonus;
       if ((wx - n.x) ** 2 + (wy - n.y) ** 2 < r * r) return n;
     }
     return null;
@@ -1473,7 +1476,7 @@ export default function MindFlowBrain() {
 
       if (dragRef.current.nodeId) {
         const dx = sx - dragRef.current.startX; const dy = sy - dragRef.current.startY;
-        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragRef.current.moved = true;
+        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) dragRef.current.moved = true;
         if (dragRef.current.moved) {
           const vp = viewportRef.current;
           setNodes(prev => prev.map(n => n.id === dragRef.current.nodeId ? { ...n, x: dragRef.current.nodeStartX + dx / vp.scale, y: dragRef.current.nodeStartY + dy / vp.scale } : n));
@@ -1556,15 +1559,20 @@ export default function MindFlowBrain() {
       }
     }
 
-    canvas.addEventListener('pointerdown', onPointerDown);
-    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
+    canvas.addEventListener('pointermove', onPointerMove, { passive: false });
     canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     canvas.addEventListener('dblclick', onDblClick);
+    // Prevent default touch behaviors (scrolling, zooming) that block interaction
+    canvas.addEventListener('touchstart', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
+    canvas.addEventListener('touchmove', (e: TouchEvent) => { e.preventDefault(); }, { passive: false });
     return () => {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
+      canvas.removeEventListener('pointercancel', onPointerUp);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('dblclick', onDblClick);
     };
@@ -1612,7 +1620,7 @@ export default function MindFlowBrain() {
   return (
     <div ref={containerRef} className="relative w-screen h-screen overflow-hidden" style={{ background: theme === 'dark' ? '#050508' : '#f0f0f5' }}>
       {/* Canvas */}
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ touchAction: 'none' }} />
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ touchAction: 'none', cursor: 'pointer' }} />
 
       {/* ─── Top Bar ──────────────────────────────────── */}
       <div className="absolute top-0 left-0 right-0 z-20 flex items-center gap-2 px-3 py-2 flex-wrap" style={{ background: theme === 'dark' ? 'rgba(5,5,8,0.85)' : 'rgba(240,240,245,0.9)', backdropFilter: 'blur(10px)', borderBottom: theme === 'dark' ? '1px solid rgba(255,255,255,0.06)' : '1px solid rgba(0,0,0,0.08)' }}>
