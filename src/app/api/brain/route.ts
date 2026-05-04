@@ -268,59 +268,241 @@ export async function POST(req: NextRequest) {
         console.log('[Brain API] generate-code for:', idea?.substring(0, 50));
 
         const phasesDesc = phases?.map((p: { name: string; description: string; tasks: { label: string; description: string }[] }) =>
-          `مرحلة: ${p.name} - ${p.description}\nالمهام: ${p.tasks?.map((t: { label: string; description: string }) => `${t.label} (${t.description})`).join(', ')}`
+          'مرحلة: ' + p.name + ' - ' + p.description + '\nالمهام: ' + (p.tasks?.map((t: { label: string; description: string }) => t.label + ' (' + t.description + ')').join(', ') || '')
         ).join('\n');
 
-        const systemPrompt = `أنت مطور Full-Stack محترف. بناءً على فكرة المشروع ومراحله ومهامه، قم بتوليد كود Next.js كامل قابل للتشغيل. أجب بصيغة JSON فقط بدون أي نص آخر. الصيغة:
-{"files":[{"path":"src/app/page.tsx","content":"...كود الصفحة الرئيسية..."},{"path":"src/components/Header.tsx","content":"...كود الهيدر..."},{"path":"src/components/Footer.tsx","content":"...كود الفوتر..."},{"path":"src/components/Hero.tsx","content":"...كود القسم البطولي..."},{"path":"src/components/Features.tsx","content":"...كود الميزات..."},{"path":"package.json","content":"...ملف الحزم..."},{"path":"tailwind.config.ts","content":"...إعدادات Tailwind..."}]}
-المتطلبات:
-1. صفحة رئيسية كاملة بتصميم احترافي باستخدام Tailwind CSS
-2. مكونات قابلة لإعادة الاستخدام (Header, Footer, Hero, Features)
-3. دعم اللغة العربية (RTL) بالكامل
-4. تصميم متجاوب (responsive) لجميع الأجهزة
-5. ألوان وسمات متناسقة
-6. الكود يجب أن يكون قابلاً للتشغيل مباشرة
-7. استخدم Next.js App Router
-8. لا تكتب أي شيء قبل أو بعد JSON
-9. كل الملفات يجب أن تكون كاملة وليست مقتطفات`;
+        // Ask AI for project structure (small JSON, not full code)
+        const systemPrompt = 'أنت مطور Full-Stack. ولّد هيكل مشروع Next.js بصيغة JSON فقط. الصيغة:\n{"projectName":"اسم المشروع","pages":[{"name":"Home","path":"/","description":"الصفحة الرئيسية","components":["Header","Hero","Features","Footer"]}],"components":[{"name":"Header","description":"شريط التنقل"},{"name":"Hero","description":"القسم البطولي"},{"name":"Features","description":"قسم الميزات"},{"name":"Footer","description":"التذييل"}],"colors":{"primary":"#6366f1","secondary":"#8b5cf6","accent":"#06b6d4","bg":"#0f172a","text":"#f8fafc"},"dependencies":["next","react","react-dom","tailwindcss"]}\nكل شيء بالعربية. لا تكتب أي شيء قبل أو بعد JSON. كن مختصراً.';
 
-        const text = await callAI([
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `فكرة المشروع: ${idea}\n\nالمراحل والمهام:\n${phasesDesc || 'غير محدد'}` },
-        ], 0.3);
-
-        let files: { path: string; content: string }[] = [];
+        let projectStructure: Record<string, unknown> | null = null;
         try {
-          // Try direct parse first
-          const parsed = JSON.parse(text);
-          files = parsed.files || [];
-        } catch {
-          // Try extracting JSON from the text
-          try {
-            const m = text.match(/\{[\s\S]*\}/);
-            if (m) {
-              try {
-                const parsed = JSON.parse(m[0]);
-                files = parsed.files || [];
-              } catch {
-                const fixed = m[0].replace(/,\s*([}\]])/g, '$1').replace(/'/g, '"');
-                const parsed = JSON.parse(fixed);
-                files = parsed.files || [];
-              }
+          const text = await callAI([
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: 'فكرة المشروع: ' + idea + '\n\nالمراحل والمهام:\n' + (phasesDesc || 'غير محدد') },
+          ], 0.3);
+
+          const m = text.match(/\{[\s\S]*\}/);
+          if (m) {
+            try {
+              projectStructure = JSON.parse(m[0]);
+            } catch {
+              const fixed = m[0].replace(/,\s*([}\]])/g, '$1').replace(/'/g, '"');
+              try { projectStructure = JSON.parse(fixed); } catch { /* empty */ }
             }
-          } catch { /* empty */ }
+          }
+        } catch (err) {
+          console.error('[Brain API] generate-code AI failed:', err instanceof Error ? err.message : String(err));
         }
 
-        // If no files parsed, generate basic files from the idea
-        if (files.length === 0) {
-          console.log('[Brain API] generate-code: No files parsed from AI, generating basic files');
-          files = [
-            { path: 'src/app/page.tsx', content: `export default function Home() {\n  return (\n    <main className="min-h-screen bg-gradient-to-b from-gray-900 to-gray-800 text-white" dir="rtl">\n      <header className="p-6 border-b border-white/10">\n        <h1 className="text-2xl font-bold">${idea}</h1>\n      </header>\n      <section className="p-12 text-center">\n        <h2 className="text-4xl font-bold mb-4">مرحباً بكم في ${idea}</h2>\n        <p className="text-gray-400 max-w-2xl mx-auto">مشروع مبتكر يقدم حلولاً ذكية</p>\n      </section>\n    </main>\n  )\n}` },
-            { path: 'src/app/layout.tsx', content: `import type { Metadata } from 'next'\n\nexport const metadata: Metadata = { title: '${idea}', description: '${idea}' }\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <html lang="ar" dir="rtl">\n      <body>{children}</body>\n    </html>\n  )\n}` },
-            { path: 'package.json', content: JSON.stringify({ name: idea.replace(/\s+/g, '-'), version: '0.1.0', private: true, scripts: { dev: 'next dev', build: 'next build', start: 'next start' }, dependencies: { next: '14.0.0', react: '^18', 'react-dom': '^18' } }, null, 2) },
-          ];
+        // Generate code files from structure or fallback
+        const pName = (projectStructure?.projectName as string) || idea || 'مشروع';
+        const colors = (projectStructure?.colors as Record<string, string>) || { primary: '#6366f1', secondary: '#8b5cf6', accent: '#06b6d4', bg: '#0f172a', text: '#f8fafc' };
+        const deps = (projectStructure?.dependencies as string[]) || ['next', 'react', 'react-dom', 'tailwindcss'];
+        const compList = (projectStructure?.components as { name: string; description: string }[]) || [
+          { name: 'Header', description: 'شريط التنقل الرئيسي' },
+          { name: 'Hero', description: 'القسم البطولي' },
+          { name: 'Features', description: 'قسم الميزات' },
+          { name: 'Footer', description: 'التذييل' },
+        ];
+        const pageList = (projectStructure?.pages as { name: string; path: string; description: string; components: string[] }[]) || [
+          { name: 'Home', path: '/', description: 'الصفحة الرئيسية', components: ['Header', 'Hero', 'Features', 'Footer'] },
+        ];
+
+        const safeName = pName.replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, '-').replace(/-+/g, '-');
+        const files: { path: string; content: string }[] = [];
+
+        // Helper: build line-based content
+        function lines(...ls: string[]) { return ls.join('\n'); }
+
+        // layout.tsx
+        files.push({
+          path: 'src/app/layout.tsx',
+          content: lines(
+            "import type { Metadata } from 'next'",
+            "import './globals.css'",
+            '',
+            'export const metadata: Metadata = {',
+            '  title: ' + JSON.stringify(pName) + ',',
+            '  description: ' + JSON.stringify(pName + ' - مشروع مبتكر') + ',',
+            '}',
+            '',
+            'export default function RootLayout({ children }: { children: React.ReactNode }) {',
+            '  return (',
+            '    <html lang="ar" dir="rtl">',
+            '      <body className="antialiased">{children}</body>',
+            '    </html>',
+            '  )',
+            '}',
+          ),
+        });
+
+        // globals.css
+        files.push({
+          path: 'src/app/globals.css',
+          content: lines(
+            '@tailwind base;',
+            '@tailwind components;',
+            '@tailwind utilities;',
+            '',
+            ':root {',
+            '  --color-primary: ' + colors.primary + ';',
+            '  --color-secondary: ' + colors.secondary + ';',
+            '  --color-accent: ' + colors.accent + ';',
+            '  --color-bg: ' + colors.bg + ';',
+            '  --color-text: ' + colors.text + ';',
+            '}',
+            '',
+            "body {",
+            '  background-color: var(--color-bg);',
+            '  color: var(--color-text);',
+            "  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;",
+            '}',
+          ),
+        });
+
+        // Components
+        const featureIcons = ['🚀', '⚡', '🔒', '🎯', '💡', '🌟'];
+        const featureNames = ['أداء عالي', 'سرعة فائقة', 'أمان متقدم', 'دقة متناهية', 'ابتكار مستمر', 'جودة عالية'];
+
+        for (const comp of compList) {
+          let content: string;
+          if (comp.name === 'Header') {
+            content = lines(
+              "'use client';",
+              '',
+              'export default function Header() {',
+              '  return (',
+              '    <header className="flex items-center justify-between px-6 py-4 border-b border-white/10 backdrop-blur-sm">',
+              '      <h1 className="text-xl font-bold" style={{ color: ' + JSON.stringify(colors.primary) + ' }}>' + pName + '</h1>',
+              '      <nav className="flex gap-6 text-sm">',
+              '        <a href="/" className="hover:text-white/80 transition-colors">الرئيسية</a>',
+              '        <a href="/about" className="hover:text-white/80 transition-colors">من نحن</a>',
+              '        <a href="/contact" className="hover:text-white/80 transition-colors">تواصل</a>',
+              '      </nav>',
+              '    </header>',
+              '  )',
+              '}',
+            );
+          } else if (comp.name === 'Hero') {
+            content = lines(
+              'export default function Hero() {',
+              '  return (',
+              '    <section className="flex flex-col items-center justify-center min-h-[60vh] text-center px-8 py-16">',
+              '      <h2 className="text-5xl font-extrabold mb-6 leading-tight">' + pName + '</h2>',
+              '      <p className="text-lg text-white/70 max-w-2xl mb-8">' + (comp.description || 'مشروع مبتكر يقدم حلولاً ذكية') + '</p>',
+              '      <button className="px-8 py-3 rounded-full font-bold text-lg transition-transform hover:scale-105" style={{ background: ' + JSON.stringify(colors.primary) + ', color: ' + JSON.stringify('#fff') + ' }}>ابدأ الآن</button>',
+              '    </section>',
+              '  )',
+              '}',
+            );
+          } else if (comp.name === 'Features') {
+            const featureCards = featureNames.map((name, i) =>
+              '        <div className="p-6 rounded-xl border border-white/10 bg-white/5 backdrop-blur-sm hover:bg-white/10 transition-colors">\n' +
+              '          <div className="text-3xl mb-3">' + featureIcons[i] + '</div>\n' +
+              '          <h3 className="text-lg font-bold mb-2">' + name + '</h3>\n' +
+              '          <p className="text-sm text-white/60">' + comp.description + '</p>\n' +
+              '        </div>'
+            ).join('\n');
+            content = lines(
+              'export default function Features() {',
+              '  return (',
+              '    <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 px-8 py-12 max-w-6xl mx-auto">',
+              featureCards,
+              '    </section>',
+              '  )',
+              '}',
+            );
+          } else if (comp.name === 'Footer') {
+            content = lines(
+              'export default function Footer() {',
+              '  return (',
+              '    <footer className="border-t border-white/10 px-6 py-6 text-center text-sm text-white/50">',
+              '      <p>' + pName + ' &copy; {new Date().getFullYear()} — جميع الحقوق محفوظة</p>',
+              '    </footer>',
+              '  )',
+              '}',
+            );
+          } else {
+            content = lines(
+              'export default function ' + comp.name + '() {',
+              '  return (',
+              '    <div className="p-6 rounded-xl border border-white/10 bg-white/5">',
+              '      <h3 className="text-lg font-bold mb-2">' + comp.name + '</h3>',
+              '      <p className="text-sm text-white/60">' + comp.description + '</p>',
+              '    </div>',
+              '  )',
+              '}',
+            );
+          }
+          files.push({ path: 'src/components/' + comp.name + '.tsx', content });
         }
 
+        // page.tsx (main page)
+        const mainComps = pageList[0]?.components || ['Header', 'Hero', 'Features', 'Footer'];
+        const importLines = mainComps.map(c => "import " + c + " from '@/components/" + c + "'").join('\n');
+        const renderLines = mainComps.map(c => '      <' + c + ' />').join('\n');
+        files.push({
+          path: 'src/app/page.tsx',
+          content: lines(
+            importLines,
+            '',
+            'export default function Home() {',
+            '  return (',
+            '    <main className="min-h-screen flex flex-col">',
+            renderLines,
+            '    </main>',
+            '  )',
+            '}',
+          ),
+        });
+
+        // package.json
+        files.push({
+          path: 'package.json',
+          content: JSON.stringify({
+            name: safeName, version: '0.1.0', private: true,
+            scripts: { dev: 'next dev', build: 'next build', start: 'next start', lint: 'next lint' },
+            dependencies: Object.fromEntries(deps.map(d => [d, d === 'next' ? '14.0.0' : d === 'react' || d === 'react-dom' ? '^18' : d === 'tailwindcss' ? '^3' : '^1'])),
+          }, null, 2),
+        });
+
+        // tailwind.config.ts
+        files.push({
+          path: 'tailwind.config.ts',
+          content: lines(
+            "import type { Config } from 'tailwindcss'",
+            '',
+            'const config: Config = {',
+            "  content: ['./src/**/*.{js,ts,jsx,tsx,mdx}'],",
+            '  theme: {',
+            '    extend: {',
+            '      colors: {',
+            '        primary: ' + JSON.stringify(colors.primary) + ',',
+            '        secondary: ' + JSON.stringify(colors.secondary) + ',',
+            '        accent: ' + JSON.stringify(colors.accent) + ',',
+            '      },',
+            '    },',
+            '  },',
+            '  plugins: [],',
+            '}',
+            'export default config',
+          ),
+        });
+
+        // next.config.js
+        files.push({
+          path: 'next.config.js',
+          content: lines(
+            '/** @type {import("next").NextConfig} */',
+            'const nextConfig = {',
+            '  reactStrictMode: true,',
+            '}',
+            '',
+            'module.exports = nextConfig',
+          ),
+        });
+
+        console.log('[Brain API] generate-code: generated', files.length, 'files');
         return NextResponse.json({ files });
       }
 
@@ -328,37 +510,26 @@ export async function POST(req: NextRequest) {
         const { idea, phases, tasks } = body;
         console.log('[Brain API] generate-preview for:', idea?.substring(0, 50));
 
-        const phasesDesc = phases?.map((p: { name: string; description: string; tasks: { label: string; description: string }[] }) =>
-          `مرحلة: ${p.name} - ${p.description}\nالمهام: ${p.tasks?.map((t: { label: string; description: string }) => `${t.label} (${t.description})`).join(', ')}`
-        ).join('\n');
+        // Build HTML directly from project data (no AI call needed - faster and no crash risk)
+        const title = String(idea || 'مشروع');
+        const phaseItems = Array.isArray(phases) ? phases : [];
+        const featuresList = phaseItems.length > 0
+          ? phaseItems.flatMap((p: { name: string; description: string; tasks: { label: string; description: string }[] }) =>
+              (p.tasks || []).map((t: { label: string; description: string }) => t.label)
+            )
+          : ['أداء عالي', 'واجهة سهلة', 'أمان متقدم', 'دعم كامل'];
+        const icons = ['🚀','⚡','🔒','🎯','💡','🌟'];
+        const description = phaseItems.length > 0
+          ? phaseItems.map((p: { name: string; description: string }) => p.name + ': ' + p.description).join('. ')
+          : 'مشروع مبتكر يقدم حلولاً ذكية ومتطورة';
 
-        const systemPrompt = `أنت مطور واجهات. ولّد صفحة HTML واحدة مستقلة (CSS+JS مدمج) للمشروع. شروط: RTL عربي، متجاوب، احترافي، ألوان متناسقة. تحتوي: شريط تنقل، قسم بطولي، ميزات، تذييل. أجب بـ HTML فقط بدون markdown أو نص آخر. لا تستخدم مكتبات خارجية.`;
+        const featureCards = featuresList.slice(0, 6).map((f: string, i: number) =>
+          '<div class="feature"><div class="feature-icon">' + (icons[i % 6] || '✨') + '</div><h3>' + f + '</h3><p>' + f + ' عالي الجودة يلبي احتياجاتك</p></div>'
+        ).join('');
 
-        let html = '';
-        try {
-          html = await callAI([
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: `المشروع: ${idea}` },
-          ], 0.3, 90000); // 90s timeout for large HTML
-        } catch (err) {
-          console.error('[Brain API] generate-preview AI failed:', err instanceof Error ? err.message : String(err));
-          // Fallback: simple HTML preview
-          html = `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${idea}</title><style>*{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Tahoma,sans-serif}body{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;min-height:100vh;display:flex;flex-direction:column}header{padding:20px;background:rgba(0,0,0,0.2)}header h1{font-size:1.5rem}main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;text-align:center}main h2{font-size:3rem;margin-bottom:20px}main p{font-size:1.2rem;opacity:0.8;max-width:600px}footer{padding:20px;background:rgba(0,0,0,0.3);text-align:center;font-size:0.9rem;opacity:0.7}</style></head><body><header><h1>${idea}</h1></header><main><h2>مرحباً بكم</h2><p>هذه معاينة أولية للمشروع - ${idea}</p></main><footer>توليد تلقائي بواسطة MindFlow Brain</footer></body></html>`;
-        }
+        const html = '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>' + title + '</title><style>*{margin:0;padding:0;box-sizing:border-box;font-family:"Segoe UI",Tahoma,Geneva,Verdana,sans-serif}body{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;min-height:100vh;display:flex;flex-direction:column}header{padding:24px 40px;display:flex;justify-content:space-between;align-items:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(10px)}header h1{font-size:1.5rem;font-weight:700;letter-spacing:1px}nav a{color:rgba(255,255,255,0.85);text-decoration:none;margin-right:24px;font-size:0.95rem;transition:color .2s}nav a:hover{color:#fff}.hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 40px;text-align:center;background:radial-gradient(ellipse at center,rgba(255,255,255,0.08) 0%,transparent 70%)}.hero h2{font-size:3.2rem;margin-bottom:16px;font-weight:800;line-height:1.2}.hero p{font-size:1.25rem;opacity:0.85;max-width:640px;line-height:1.8;margin-bottom:32px}.hero button{padding:14px 40px;font-size:1.1rem;border:none;border-radius:50px;background:#fff;color:#667eea;font-weight:700;cursor:pointer;transition:transform .2s,box-shadow .2s;box-shadow:0 4px 20px rgba(0,0,0,0.2)}.hero button:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(0,0,0,0.3)}.features{padding:60px 40px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:24px;max-width:1000px;margin:0 auto}.feature{background:rgba(255,255,255,0.1);backdrop-filter:blur(10px);border-radius:16px;padding:32px 24px;text-align:center;border:1px solid rgba(255,255,255,0.15);transition:transform .2s}.feature:hover{transform:translateY(-4px)}.feature-icon{font-size:2.5rem;margin-bottom:12px}.feature h3{font-size:1.1rem;margin-bottom:8px}.feature p{font-size:0.9rem;opacity:0.8}footer{padding:24px;background:rgba(0,0,0,0.2);text-align:center;font-size:0.9rem;opacity:0.7}@media(max-width:768px){.hero h2{font-size:2rem}.hero p{font-size:1rem}.features{grid-template-columns:1fr 1fr;padding:40px 20px}}</style></head><body><header><h1>' + title + '</h1><nav><a href="#">الرئيسية</a><a href="#">الميزات</a><a href="#">تواصل</a></nav></header><section class="hero"><h2>' + title + '</h2><p>' + description + '</p><button>ابدأ الآن</button></section><section class="features">' + featureCards + '</section><footer>توليد تلقائي بواسطة MindFlow Brain</footer></body></html>';
 
-        // Strip markdown code fences if present
-        let cleanHtml = html.trim();
-        if (cleanHtml.startsWith('```html')) {
-          cleanHtml = cleanHtml.slice(7);
-        } else if (cleanHtml.startsWith('```')) {
-          cleanHtml = cleanHtml.slice(3);
-        }
-        if (cleanHtml.endsWith('```')) {
-          cleanHtml = cleanHtml.slice(0, -3);
-        }
-        cleanHtml = cleanHtml.trim();
-
-        return NextResponse.json({ html: cleanHtml });
+        return NextResponse.json({ html });
       }
 
       case 'generate-report': {

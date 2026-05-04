@@ -1175,7 +1175,8 @@ export default function MindFlowBrain() {
         setCodeFiles(data.files);
         setSelectedCodeFile(data.files[0].path);
       }
-    } catch {
+    } catch (err) {
+      console.error('generateProjectCode error:', err);
       setCodeFiles([]);
     }
     setCodeLoading(false);
@@ -1212,7 +1213,8 @@ export default function MindFlowBrain() {
       if (data.html) {
         setPreviewHtml(data.html);
       }
-    } catch {
+    } catch (err) {
+      console.error('generateProjectPreview error:', err);
       setPreviewHtml('');
     }
     setPreviewLoading(false);
@@ -1249,7 +1251,8 @@ export default function MindFlowBrain() {
       if (data.report) {
         setReportData(data.report);
       }
-    } catch {
+    } catch (err) {
+      console.error('generateProjectReport error:', err);
       setReportData(null);
     }
     setReportLoading(false);
