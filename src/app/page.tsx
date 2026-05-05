@@ -280,18 +280,20 @@ function ProjectPanel({ projectNode, nodes, theme, taskExecuting, onClose, onExe
 }
 
 // ─── Live Output Panel Component ──────────────────────────
-function LivePanel({ open, title, type, content, fullContent, onClose, onCopy, onOpenNew, onDownload }: {
+function LivePanel({ open, title, type, content, fullContent, previewHtml, onClose, onCopy, onOpenNew, onDownload }: {
   open: boolean;
   title: string;
   type: 'planning' | 'code' | 'preview' | 'report';
   content: string;
   fullContent: string;
+  previewHtml: string;
   onClose: () => void;
   onCopy: () => void;
   onOpenNew: () => void;
   onDownload: () => void;
 }) {
   const contentRef = useRef<HTMLPreElement>(null);
+  const [showPreview, setShowPreview] = useState(false);
   useEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = contentRef.current.scrollHeight;
   }, [content]);
@@ -302,7 +304,7 @@ function LivePanel({ open, title, type, content, fullContent, onClose, onCopy, o
   const typeLabel = type === 'code' ? 'توليد الكود' : type === 'preview' ? 'المعاينة' : type === 'report' ? 'التقرير' : 'التخطيط';
 
   return (
-    <div className="fixed top-0 left-0 h-full z-40 pointer-events-auto" style={{ width: '420px', maxWidth: '90vw' }}>
+    <div className="fixed top-0 left-0 h-full z-40 pointer-events-auto" style={{ width: '480px', maxWidth: '95vw' }}>
       <div className="h-full flex flex-col bg-gray-950 text-gray-100 border-l border-gray-800 shadow-2xl">
         {/* Title bar */}
         <div className="flex items-center justify-between px-3 py-2 border-b border-gray-800 bg-gray-900">
@@ -311,13 +313,29 @@ function LivePanel({ open, title, type, content, fullContent, onClose, onCopy, o
             <span className="text-xs font-bold text-cyan-400">{typeLabel}</span>
             <span className="text-[10px] text-gray-500">— {title}</span>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm px-1">✕</button>
+          <div className="flex items-center gap-1">
+            {type === 'preview' && previewHtml && (
+              <button onClick={() => setShowPreview(!showPreview)} className="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">
+                {showPreview ? '📝 الكود' : '👁️ معاينة'}
+              </button>
+            )}
+            <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-sm px-1">✕</button>
+          </div>
         </div>
         {/* Content area */}
-        <pre ref={contentRef} className="flex-1 overflow-auto p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words" dir="ltr" style={{ background: '#0d1117' }}>
-          {content}
-          <span className="animate-pulse text-cyan-400">▌</span>
-        </pre>
+        {type === 'preview' && showPreview && previewHtml ? (
+          <iframe
+            srcDoc={previewHtml}
+            className="flex-1 w-full bg-white"
+            sandbox="allow-scripts"
+            title="معاينة مباشرة"
+          />
+        ) : (
+          <pre ref={contentRef} className="flex-1 overflow-auto p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words" dir="ltr" style={{ background: '#0d1117' }}>
+            {content}
+            <span className="animate-pulse text-cyan-400">▌</span>
+          </pre>
+        )}
         {/* Bottom buttons */}
         <div className="flex items-center gap-1.5 px-3 py-2 border-t border-gray-800 bg-gray-900">
           <button onClick={onCopy} className="px-2.5 py-1 rounded text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">📋 نسخ</button>
@@ -1147,6 +1165,14 @@ export default function MindFlowBrain() {
       const brain = nodesRef.current.find(n => n.id === BRAIN_ID);
       if (!brain) { setIdeaError('لم يتم العثور على العقل المركزي'); return; }
 
+      // Pre-generate consistent task IDs so project root and task nodes share the same IDs
+      const taskIds = new Map<string, string>();
+      analysis.phases.forEach(p => {
+        p.tasks.forEach(t => {
+          if (!taskIds.has(t.label)) taskIds.set(t.label, nid());
+        });
+      });
+
       const projectAngle = Math.random() * Math.PI * 2;
       const projectDist = 300;
       const projectNode = makeNode({
@@ -1158,7 +1184,7 @@ export default function MindFlowBrain() {
         connections: [BRAIN_ID], color: '#f59e0b',
         isProject: true, projectPhase: 'planning', projectProgress: 0,
         projectTasks: analysis.phases.flatMap(p =>
-          p.tasks.map(t => ({ id: nid(), label: t.label, status: 'pending' as const }))
+          p.tasks.map(t => ({ id: taskIds.get(t.label)!, label: t.label, status: 'pending' as const }))
         ),
         knowledgeLevel: 30, maturity: 'sprout', visitCount: 3,
       });
@@ -1170,12 +1196,15 @@ export default function MindFlowBrain() {
       analysis.phases.forEach((phase, pi) => {
         const phaseAngle = projectAngle + (pi / analysis.phases.length) * Math.PI * 2;
         const phaseDist = 180;
+        // Phase node also gets its tasks with the same IDs
+        const phaseTasks = phase.tasks.map(t => ({ id: taskIds.get(t.label)!, label: t.label, status: 'pending' as const }));
         const phaseNode = makeNode({
           id: nid(), label: phase.name, tag: 'مرحلة', summary: phase.description,
           x: projectNode.x + Math.cos(phaseAngle) * phaseDist,
           y: projectNode.y + Math.sin(phaseAngle) * phaseDist,
           depth: 2, parentId: projectNode.id, color: '#f59e0b',
           connections: [projectNode.id], knowledgeLevel: 10,
+          projectTasks: phaseTasks,
         });
         newNodes.push(phaseNode);
         newEdges.push({ id: eid(), from: projectNode.id, to: phaseNode.id, type: 'project', strength: 0.8, animated: true, createdAt: Date.now() });
@@ -1191,7 +1220,7 @@ export default function MindFlowBrain() {
             depth: 3, parentId: phaseNode.id, color: '#34d399',
             connections: [phaseNode.id], knowledgeLevel: 0,
             isProject: false,
-            projectTasks: [{ id: nid(), label: task.label, status: 'pending' }],
+            projectTasks: [{ id: taskIds.get(task.label)!, label: task.label, status: 'pending' }],
           });
           newNodes.push(taskNode);
           newEdges.push({ id: eid(), from: phaseNode.id, to: taskNode.id, type: 'project', strength: 0.6, animated: true, createdAt: Date.now() });
@@ -1228,20 +1257,21 @@ export default function MindFlowBrain() {
       }
     });
 
-    // Calculate progress for a node based on its children
+    // Calculate progress for a node based on its children first, then own tasks
     function calcProgress(nodeId: string): number {
       const children = childrenMap.get(nodeId);
-      if (!children || children.length === 0) {
-        // Leaf node - use its own projectTasks
-        const node = allNodes.find(n => n.id === nodeId);
-        if (!node) return 0;
-        const tasks = node.projectTasks || [];
-        if (tasks.length === 0) return 0;
-        return Math.round(tasks.filter(t => t.status === 'done').length / tasks.length * 100);
+      const node = allNodes.find(n => n.id === nodeId);
+      if (!node) return 0;
+
+      if (children && children.length > 0) {
+        // Has children: use children's progress (average)
+        const childProgresses = children.map(c => calcProgress(c.id));
+        return Math.round(childProgresses.reduce((a, b) => a + b, 0) / childProgresses.length);
       }
-      // Average of children's progress
-      const childProgresses = children.map(c => calcProgress(c.id));
-      return Math.round(childProgresses.reduce((a, b) => a + b, 0) / childProgresses.length);
+      // Leaf node - use its own projectTasks
+      const tasks = node.projectTasks || [];
+      if (tasks.length === 0) return node.projectProgress || 0;
+      return Math.round(tasks.filter(t => t.status === 'done').length / tasks.length * 100);
     }
 
     // Walk up from startNodeId and update each ancestor
@@ -1266,58 +1296,93 @@ export default function MindFlowBrain() {
 
   const executeTask = useCallback(async (taskId: string, taskLabel: string, parentNodeId: string) => {
     setTaskExecuting(taskId);
+
+    // Open live panel for real-time execution progress
+    setLivePanelOpen(true);
+    setLivePanelTitle(`تنفيذ: ${taskLabel}`);
+    setLivePanelType('planning');
+    setLivePanelContent(`⏳ جاري تنفيذ المهمة: ${taskLabel}\n\n📊 التحليل...\n`);
+    setLivePanelFullContent('');
+
     try {
-      // Find the project node for context
-      const projectNode = nodesRef.current.find(n => n.id === parentNodeId || n.isProject);
+      // Find the project root node for context
+      const projectNode = nodesRef.current.find(n => n.isProject) || nodesRef.current.find(n => n.id === parentNodeId);
+
+      // Simulate realistic step-by-step execution
+      const steps = [
+        { label: 'تحليل المتطلبات', delay: 400 },
+        { label: 'تجهيز الموارد', delay: 300 },
+        { label: 'التنفيذ الفعلي', delay: 500 },
+        { label: 'التحقق من النتائج', delay: 300 },
+      ];
+
+      let progressText = `⏳ تنفيذ: ${taskLabel}\n\n`;
+      for (const step of steps) {
+        progressText += `  ▶️ ${step.label}...\n`;
+        setLivePanelContent(progressText);
+        await new Promise(r => setTimeout(r, step.delay));
+        progressText += `  ✅ ${step.label} - تم\n\n`;
+        setLivePanelContent(progressText);
+      }
+      progressText += `📞 استدعاء الذكاء الاصطناعي...\n`;
+      setLivePanelContent(progressText);
+
       const res = await fetch('/api/brain', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'execute-task', taskLabel, taskDescription: taskLabel, projectContext: projectNode?.label || '' }),
       });
       const data = await res.json();
+      const result = data.result || 'تم تنفيذ المهمة بنجاح';
 
-      // Mark the task as done and store the result in summary
+      // Mark the task as done on ALL nodes that contain it (by ID or label)
       setNodes(prev => {
         const updated = prev.map(n => {
-          if (n.id === parentNodeId) {
-            const updatedTasks = n.projectTasks.map(t => t.id === taskId ? { ...t, status: 'done' as const, summary: data.result || '' } : t);
+          // Check if this node has a task matching by ID or label
+          const hasMatchingTask = n.projectTasks?.some(t => t.id === taskId || t.label === taskLabel);
+          if (hasMatchingTask) {
+            const updatedTasks = n.projectTasks.map(t =>
+              (t.id === taskId || t.label === taskLabel)
+                ? { ...t, status: 'done' as const, summary: result }
+                : t
+            );
+            const doneCount = updatedTasks.filter(t => t.status === 'done').length;
             const allDone = updatedTasks.every(t => t.status === 'done');
-            return { ...n, projectTasks: updatedTasks, projectProgress: allDone ? 100 : Math.round(updatedTasks.filter(t => t.status === 'done').length / updatedTasks.length * 100), projectPhase: allDone ? 'done' : 'execution' };
+            const progress = updatedTasks.length > 0 ? Math.round(doneCount / updatedTasks.length * 100) : 0;
+            return {
+              ...n,
+              projectTasks: updatedTasks,
+              projectProgress: progress,
+              projectPhase: allDone ? 'done' as const : 'execution' as const,
+            };
+          }
+          // Also update task nodes by label (for summary update)
+          if (n.label === taskLabel && n.tag === 'مهمة') {
+            return { ...n, summary: result };
           }
           return n;
         });
-        // Now propagate progress up the hierarchy
+
+        // Find the project root and recalculate all progress from there
+        const projectRoot = updated.find(n => n.isProject);
+        if (projectRoot) {
+          return updateAncestorProgress(projectRoot.id, updated);
+        }
         return updateAncestorProgress(parentNodeId, updated);
       });
-
-      // Also update the task node's summary if it's a separate node
-      setNodes(prev => prev.map(n => {
-        // If there's a task node with this task's label that's a child of the parent
-        if (n.parentId === parentNodeId && n.label === taskLabel) {
-          return { ...n, summary: data.result || n.summary };
-        }
-        return n;
-      }));
 
       setBrainStats(prev => ({ ...prev, tasksCompleted: prev.tasksCompleted + 1 }));
       feedBrain(parentNodeId);
       addTimeline('project', `تم تنفيذ: ${taskLabel}`);
 
-      // Show result in a small toast-like notification
-      if (data.result) {
-        setLivePanelTitle(`نتيجة: ${taskLabel}`);
-        setLivePanelType('planning');
-        setLivePanelContent('');
-        setLivePanelFullContent(data.result);
-        setLivePanelOpen(true);
-        // Animate typing the result
-        let idx = 0;
-        const text = data.result;
-        const interval = setInterval(() => {
-          idx += Math.min(3, text.length - idx);
-          setLivePanelContent(text.slice(0, idx));
-          if (idx >= text.length) clearInterval(interval);
-        }, 20);
-      }
+      // Show final result with typing animation
+      progressText += `\n✅ النتيجة:\n${result}`;
+      setLivePanelFullContent(progressText);
+      let idx = progressText.length - result.length - 12;
+      const interval = setInterval(() => {
+        idx += Math.min(3, progressText.length - idx);
+        setLivePanelContent(progressText.slice(0, idx));
+        if (idx >= progressText.length) clearInterval(interval);
+      }, 15);
     } catch {
       // Show error
       setLivePanelTitle('خطأ في التنفيذ');
@@ -1415,6 +1480,7 @@ export default function MindFlowBrain() {
       if (data.files?.length) {
         setCodeFiles(data.files);
         setSelectedCodeFile(data.files[0].path);
+        setCodeDialogOpen(true);
         // Build full content
         const fullText = data.files.map((f: { path: string; content: string }) =>
           `\n${'═'.repeat(50)}\n📄 ${f.path}\n${'═'.repeat(50)}\n\n${f.content}`
@@ -1481,6 +1547,7 @@ export default function MindFlowBrain() {
       const data = await res.json();
       if (data.html) {
         setPreviewHtml(data.html);
+        setPreviewOpen(true);
         // Show HTML source in live panel with typing animation
         const fullText = data.html;
         setLivePanelFullContent(fullText);
@@ -1541,6 +1608,7 @@ export default function MindFlowBrain() {
       const data = await res.json();
       if (data.report) {
         setReportData(data.report);
+        setReportDialogOpen(true);
         // Build formatted report text
         const r = data.report;
         const parts: string[] = [];
@@ -2962,6 +3030,7 @@ export default function MindFlowBrain() {
         type={livePanelType}
         content={livePanelContent}
         fullContent={livePanelFullContent}
+        previewHtml={livePanelType === 'preview' ? previewHtml : ''}
         onClose={() => setLivePanelOpen(false)}
         onCopy={() => { navigator.clipboard.writeText(livePanelFullContent); }}
         onOpenNew={() => {

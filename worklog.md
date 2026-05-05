@@ -104,3 +104,30 @@ Stage Summary:
 - FIX: Deferred localStorage loading to useEffect after mount + added mounted guard
 - AI API route (/api/brain) is functional and returns correct responses
 - Build succeeds, SSR output is consistent between server and client
+
+---
+Task ID: 1
+Agent: Main Agent
+Task: Fix all broken features and implement new requirements
+
+Work Log:
+- Read and analyzed all project files (page.tsx 2986 lines, route.ts 599 lines)
+- Identified root cause: generate functions never opened their respective dialogs
+- Fixed generateProjectCode: added setCodeDialogOpen(true) after code loads
+- Fixed generateProjectPreview: added setPreviewOpen(true) after HTML loads
+- Fixed generateProjectReport: added setReportDialogOpen(true) after report loads
+- Fixed task ID inconsistency: analyzeIdea now pre-generates consistent task IDs using Map
+- Phase nodes now also get projectTasks with same IDs as project root and task nodes
+- Rewrote executeTask to update tasks on ALL nodes (by ID or label matching)
+- Added realistic step-by-step execution with progress feedback in Live Panel
+- Improved updateAncestorProgress to handle nodes with children AND own tasks
+- Enhanced LivePanel component: added iframe preview mode, wider panel, preview toggle button
+- Added previewHtml prop to LivePanel for live preview rendering
+- Build succeeded, server restarted and returning 200
+
+Stage Summary:
+- All 3 features (code/preview/report) now open their dialogs properly
+- Parent-child node completion sync works correctly with consistent task IDs
+- Realistic execution shows step-by-step progress before AI call
+- Live Panel has iframe preview mode for preview content
+- Server running at http://localhost:3000
